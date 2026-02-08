@@ -20,6 +20,7 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 
 from loot_parser import LootParser, ZONE_NAMES
 from paths import get_gorgon_tracker_data_dir, get_pg_chatlog_dir
+from reports_parser import ReportsParser, FAVOR_DISPLAY, FAVOR_LEVELS
 
 # List of valid zone display names for dropdown
 VALID_ZONES = sorted([name for name in ZONE_NAMES.values() if name is not None])
@@ -60,6 +61,22 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # Search state
         self.search_var = ctk.StringVar()
+        self.storage_search_var = ctk.StringVar()
+
+        # Current left tab selection
+        self.current_left_tab = "Creatures"
+
+        # Selected items for each tab
+        self.selected_skill = None
+        self.selected_npc = None
+        self.selected_storage_item = None
+        self.selected_quest = None
+
+        # Vault selection for storage tab
+        self.selected_vault = "All"
+
+        # Reports parser for character/storage/quests
+        self.reports_parser = ReportsParser()
 
         # Thread synchronization for shared data
         self._data_lock = threading.Lock()
@@ -75,6 +92,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # Initial data load
         self._refresh_creature_list()
+        self._refresh_reports_data()
 
         # Start auto-update if enabled
         if self.auto_update_enabled:
@@ -347,23 +365,56 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._create_detail_panel(main_frame)
 
     def _create_creature_list(self, parent):
-        """Create the creature list panel."""
+        """Create the left panel with tabbed interface."""
         left_frame = ctk.CTkFrame(parent)
         left_frame.grid(row=0, column=0, sticky="nsew", padx=(5, 5), pady=5)
 
-        # Header
-        header_frame = ctk.CTkFrame(left_frame, fg_color="transparent")
-        header_frame.pack(fill="x", padx=10, pady=(10, 5))
+        # Create tabview
+        self.left_tabview = ctk.CTkTabview(left_frame, height=50)
+        self.left_tabview.pack(fill="both", expand=True, padx=5, pady=5)
 
-        ctk.CTkLabel(
-            header_frame,
-            text="Creatures",
-            font=ctk.CTkFont(size=16, weight="bold")
-        ).pack(side="left")
+        # Add tabs
+        self.left_tabview.add("Creatures")
+        self.left_tabview.add("Character")
+        self.left_tabview.add("Storage")
+        self.left_tabview.add("Quests")
+
+        # Set default tab
+        self.left_tabview.set("Creatures")
+
+        # Track which tabs have been populated (lazy loading)
+        self._tabs_populated = {"Creatures": False, "Character": False, "Storage": False, "Quests": False}
+
+        # Bind tab change event
+        self.left_tabview.configure(command=self._on_tab_changed)
+
+        # Create UI structure for each tab (but don't populate data yet)
+        self._create_creatures_tab()
+        self._create_character_tab()
+        self._create_storage_tab()
+        self._create_quests_tab()
+
+    def _on_tab_changed(self):
+        """Handle tab change events with lazy loading."""
+        self.current_left_tab = self.left_tabview.get()
+
+        # Lazy load tab content on first view
+        if not self._tabs_populated.get(self.current_left_tab, False):
+            self._tabs_populated[self.current_left_tab] = True
+            if self.current_left_tab == "Character":
+                self._refresh_character_tab()
+            elif self.current_left_tab == "Storage":
+                self._refresh_storage_tab()
+            elif self.current_left_tab == "Quests":
+                self._refresh_quests_tab()
+
+    def _create_creatures_tab(self):
+        """Create the Creatures tab content."""
+        tab = self.left_tabview.tab("Creatures")
 
         # Search box
-        search_frame = ctk.CTkFrame(left_frame, fg_color="transparent")
-        search_frame.pack(fill="x", padx=10, pady=(5, 5))
+        search_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        search_frame.pack(fill="x", padx=5, pady=(5, 5))
 
         self.search_entry = ctk.CTkEntry(
             search_frame,
@@ -388,9 +439,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         # Bind search variable to callback
         self.search_var.trace_add("write", self._on_search_changed)
 
-        # Column headers (zone is now shown as section headers)
-        col_header = ctk.CTkFrame(left_frame, fg_color="transparent", height=25)
-        col_header.pack(fill="x", padx=10)
+        # Column headers
+        col_header = ctk.CTkFrame(tab, fg_color="transparent", height=25)
+        col_header.pack(fill="x", padx=5)
         col_header.pack_propagate(False)
 
         ctk.CTkLabel(
@@ -410,8 +461,608 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         ).pack(side="left")
 
         # Scrollable creature list
-        self.creature_scroll = ctk.CTkScrollableFrame(left_frame)
-        self.creature_scroll.pack(fill="both", expand=True, padx=5, pady=5)
+        self.creature_scroll = ctk.CTkScrollableFrame(tab)
+        self.creature_scroll.pack(fill="both", expand=True, padx=0, pady=5)
+
+    def _create_character_tab(self):
+        """Create the Character tab content."""
+        tab = self.left_tabview.tab("Character")
+
+        # Scrollable content
+        self.character_scroll = ctk.CTkScrollableFrame(tab)
+        self.character_scroll.pack(fill="both", expand=True, padx=0, pady=5)
+
+        # Character header (will be populated on refresh)
+        self.char_header_frame = ctk.CTkFrame(self.character_scroll, fg_color="transparent")
+        self.char_header_frame.pack(fill="x", padx=5, pady=(0, 10))
+
+        self.char_name_label = ctk.CTkLabel(
+            self.char_header_frame,
+            text="No character data",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        self.char_name_label.pack(anchor="w")
+
+        self.char_info_label = ctk.CTkLabel(
+            self.char_header_frame,
+            text="Export character data from game to view",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        self.char_info_label.pack(anchor="w")
+
+        # Currencies section
+        self.currencies_frame = ctk.CTkFrame(self.character_scroll)
+        self.currencies_frame.pack(fill="x", padx=5, pady=(0, 10))
+
+        # Skills section header
+        self.skills_header = ctk.CTkButton(
+            self.character_scroll,
+            text="Skills",
+            anchor="w",
+            fg_color=("gray85", "gray25"),
+            text_color=("gray10", "gray90"),
+            hover_color=("gray75", "gray35"),
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda: self._toggle_section("skills")
+        )
+        self.skills_header.pack(fill="x", padx=5, pady=(5, 2))
+
+        self.skills_content = ctk.CTkFrame(self.character_scroll, fg_color="transparent")
+        self.skills_content.pack(fill="x", padx=5, pady=(0, 10))
+
+        # NPCs section header
+        self.npcs_header = ctk.CTkButton(
+            self.character_scroll,
+            text="NPCs",
+            anchor="w",
+            fg_color=("gray85", "gray25"),
+            text_color=("gray10", "gray90"),
+            hover_color=("gray75", "gray35"),
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda: self._toggle_section("npcs")
+        )
+        self.npcs_header.pack(fill="x", padx=5, pady=(5, 2))
+
+        self.npcs_content = ctk.CTkFrame(self.character_scroll, fg_color="transparent")
+        self.npcs_content.pack(fill="x", padx=5, pady=(0, 10))
+
+        # Section expanded states
+        self.section_expanded = {"skills": True, "npcs": True}
+
+    def _toggle_section(self, section: str):
+        """Toggle collapsible section."""
+        self.section_expanded[section] = not self.section_expanded.get(section, True)
+        self._refresh_character_tab()
+
+    def _create_storage_tab(self):
+        """Create the Storage tab content."""
+        tab = self.left_tabview.tab("Storage")
+
+        # Vault selector
+        vault_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        vault_frame.pack(fill="x", padx=5, pady=(5, 5))
+
+        ctk.CTkLabel(
+            vault_frame,
+            text="Vault:",
+            font=ctk.CTkFont(size=12)
+        ).pack(side="left")
+
+        self.vault_dropdown = ctk.CTkOptionMenu(
+            vault_frame,
+            values=["All"],
+            width=150,
+            height=28,
+            command=self._on_vault_changed
+        )
+        self.vault_dropdown.pack(side="left", padx=(5, 0))
+
+        # Search box for storage
+        search_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        search_frame.pack(fill="x", padx=5, pady=(5, 5))
+
+        self.storage_search_entry = ctk.CTkEntry(
+            search_frame,
+            placeholder_text="Search items...",
+            textvariable=self.storage_search_var,
+            width=220,
+            height=28,
+            font=ctk.CTkFont(size=12)
+        )
+        self.storage_search_entry.pack(side="left", fill="x", expand=True)
+
+        self.storage_search_clear = ctk.CTkButton(
+            search_frame,
+            text="x",
+            width=28,
+            height=28,
+            font=ctk.CTkFont(size=12),
+            command=lambda: self.storage_search_var.set("")
+        )
+        self.storage_search_clear.pack(side="left", padx=(5, 0))
+
+        self.storage_search_var.trace_add("write", lambda *args: self._refresh_storage_tab())
+
+        # Summary row
+        self.storage_summary = ctk.CTkLabel(
+            tab,
+            text="No storage data",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        self.storage_summary.pack(anchor="w", padx=10, pady=(0, 5))
+
+        # Use Treeview for performance (handles many items efficiently)
+        tree_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        columns = ("name", "qty", "location")
+        self.storage_tree = ttk.Treeview(
+            tree_frame,
+            columns=columns,
+            show="headings",
+            style="Dark.Treeview"
+        )
+
+        # Sort state: column -> ascending (True/False), default sort by name ascending
+        self.storage_sort_state = {"name": True, "qty": True, "location": True}
+        self.storage_sort_column = "name"
+
+        # Column headings with click-to-sort (show arrow on default sort column)
+        self.storage_tree.heading("name", text="Item \u25b2", anchor="w",
+                                   command=lambda: self._sort_storage("name"))
+        self.storage_tree.heading("qty", text="Qty", anchor="center",
+                                   command=lambda: self._sort_storage("qty"))
+        self.storage_tree.heading("location", text="Location", anchor="w",
+                                   command=lambda: self._sort_storage("location"))
+
+        self.storage_tree.column("name", width=160, minwidth=100, anchor="w")
+        self.storage_tree.column("qty", width=40, minwidth=30, anchor="center")
+        self.storage_tree.column("location", width=80, minwidth=50, anchor="w")
+
+        # Rarity color tags
+        self.storage_tree.tag_configure("common", foreground="#FFFFFF")
+        self.storage_tree.tag_configure("uncommon", foreground="#4CAF50")
+        self.storage_tree.tag_configure("rare", foreground="#2196F3")
+        self.storage_tree.tag_configure("epic", foreground="#9C27B0")
+        self.storage_tree.tag_configure("legendary", foreground="#FF9800")
+
+        # Scrollbar
+        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.storage_tree.yview)
+        self.storage_tree.configure(yscrollcommand=scrollbar.set)
+
+        self.storage_tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+    def _sort_storage(self, column: str):
+        """Sort storage treeview by column, toggling ascending/descending."""
+        # Toggle sort direction if clicking same column, else start ascending
+        if self.storage_sort_column == column:
+            self.storage_sort_state[column] = not self.storage_sort_state[column]
+        else:
+            self.storage_sort_state[column] = True
+            self.storage_sort_column = column
+
+        ascending = self.storage_sort_state[column]
+
+        # Get all items with their values
+        items = []
+        for item_id in self.storage_tree.get_children():
+            values = self.storage_tree.item(item_id, "values")
+            tags = self.storage_tree.item(item_id, "tags")
+            items.append((item_id, values, tags))
+
+        # Sort based on column
+        col_index = {"name": 0, "qty": 1, "location": 2}[column]
+
+        if column == "qty":
+            # Numeric sort for quantity
+            items.sort(key=lambda x: int(x[1][col_index]), reverse=not ascending)
+        else:
+            # Alphabetical sort for name and location
+            items.sort(key=lambda x: x[1][col_index].lower(), reverse=not ascending)
+
+        # Reorder items in treeview
+        for idx, (item_id, values, tags) in enumerate(items):
+            self.storage_tree.move(item_id, "", idx)
+
+        # Update header to show sort indicator
+        arrow = " \u25b2" if ascending else " \u25bc"
+        headers = {"name": "Item", "qty": "Qty", "location": "Location"}
+        for col, text in headers.items():
+            if col == column:
+                self.storage_tree.heading(col, text=text + arrow)
+            else:
+                self.storage_tree.heading(col, text=text)
+
+    def _on_vault_changed(self, value):
+        """Handle vault selection change."""
+        self.selected_vault = value
+        self._refresh_storage_tab()
+
+    def _create_quests_tab(self):
+        """Create the Quests tab content."""
+        tab = self.left_tabview.tab("Quests")
+
+        # Status label
+        self.quests_status = ctk.CTkLabel(
+            tab,
+            text="Loading quest data...",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        self.quests_status.pack(anchor="w", padx=10, pady=(5, 5))
+
+        # Scrollable quest list
+        self.quests_scroll = ctk.CTkScrollableFrame(tab)
+        self.quests_scroll.pack(fill="both", expand=True, padx=0, pady=5)
+
+        # Quest zone expanded states
+        self.quest_zone_expanded = {}
+
+    def _refresh_reports_data(self):
+        """Refresh reports data for currently visible tab only (lazy loading)."""
+        # Only refresh the currently visible tab to avoid lag
+        if self.current_left_tab == "Character":
+            self._refresh_character_tab()
+        elif self.current_left_tab == "Storage":
+            self._refresh_storage_tab()
+        elif self.current_left_tab == "Quests":
+            self._refresh_quests_tab()
+        # Creatures tab is handled by _refresh_creature_list()
+
+    def _refresh_character_tab(self):
+        """Refresh the Character tab content."""
+        if not hasattr(self, 'char_name_label'):
+            return
+
+        # Load character data
+        char_data = self.reports_parser.load_character()
+
+        if not char_data:
+            self.char_name_label.configure(text="No character data")
+            self.char_info_label.configure(text="Export character data from game to view")
+            return
+
+        # Update header
+        char_name = self.reports_parser.get_character_name()
+        race = self.reports_parser.get_race()
+        gold = self.reports_parser.get_gold()
+
+        self.char_name_label.configure(text=char_name or "Unknown")
+        self.char_info_label.configure(text=f"{race or 'Unknown'} - {gold:,} Gold")
+
+        # Update currencies
+        for widget in self.currencies_frame.winfo_children():
+            widget.destroy()
+
+        ctk.CTkLabel(
+            self.currencies_frame,
+            text="Currencies",
+            font=ctk.CTkFont(size=12, weight="bold")
+        ).pack(anchor="w", padx=10, pady=(10, 5))
+
+        currencies = self.reports_parser.get_currencies()
+        for name, amount in currencies.items():
+            if name == "Gold":
+                continue  # Already shown in header
+            row = ctk.CTkFrame(self.currencies_frame, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=1)
+            ctk.CTkLabel(row, text=name, font=ctk.CTkFont(size=11), anchor="w", width=140).pack(side="left")
+            ctk.CTkLabel(row, text=f"{amount:,}", font=ctk.CTkFont(size=11), anchor="e").pack(side="right")
+
+        # Update skills section
+        for widget in self.skills_content.winfo_children():
+            widget.destroy()
+
+        arrow = "\u25bc" if self.section_expanded.get("skills", True) else "\u25b6"
+        skills = self.reports_parser.get_skills()
+        self.skills_header.configure(text=f"{arrow} Skills ({len(skills)})")
+
+        if self.section_expanded.get("skills", True):
+            # Show top 15 skills
+            for skill in skills[:15]:
+                row = ctk.CTkFrame(self.skills_content, fg_color="transparent", height=24)
+                row.pack(fill="x", pady=1)
+                row.pack_propagate(False)
+
+                name_text = skill["name"]
+                if skill["bonus"] > 0:
+                    name_text += f" (+{skill['bonus']})"
+
+                name_btn = ctk.CTkButton(
+                    row,
+                    text=name_text[:25] + "..." if len(name_text) > 25 else name_text,
+                    width=180,
+                    height=22,
+                    anchor="w",
+                    fg_color="transparent",
+                    text_color=("gray10", "gray90"),
+                    hover_color=("gray80", "gray30"),
+                    font=ctk.CTkFont(size=11),
+                    command=lambda s=skill: self._select_skill(s)
+                )
+                name_btn.pack(side="left")
+
+                ctk.CTkLabel(
+                    row,
+                    text=f"Lv {skill['level']}",
+                    font=ctk.CTkFont(size=11),
+                    width=50,
+                    anchor="e"
+                ).pack(side="right", padx=(0, 5))
+
+        # Update NPCs section
+        for widget in self.npcs_content.winfo_children():
+            widget.destroy()
+
+        npcs = self.reports_parser.get_npc_relationships()
+        arrow = "\u25bc" if self.section_expanded.get("npcs", True) else "\u25b6"
+        self.npcs_header.configure(text=f"{arrow} NPCs ({len(npcs)})")
+
+        if self.section_expanded.get("npcs", True):
+            # Group NPCs by favor level
+            npcs_by_favor = {}
+            for npc in npcs:
+                favor = npc["favor_display"]
+                if favor not in npcs_by_favor:
+                    npcs_by_favor[favor] = []
+                npcs_by_favor[favor].append(npc)
+
+            for favor in ["Soul Mates", "Like Family", "Best Friends", "Close Friends", "Friends", "Comfortable", "Tolerated"]:
+                if favor not in npcs_by_favor:
+                    continue
+
+                # Favor level header
+                ctk.CTkLabel(
+                    self.npcs_content,
+                    text=favor,
+                    font=ctk.CTkFont(size=10, weight="bold"),
+                    text_color=self._get_favor_color(favor)
+                ).pack(anchor="w", padx=5, pady=(5, 2))
+
+                for npc in npcs_by_favor[favor]:
+                    row = ctk.CTkFrame(self.npcs_content, fg_color="transparent", height=22)
+                    row.pack(fill="x", pady=1)
+                    row.pack_propagate(False)
+
+                    ctk.CTkLabel(
+                        row,
+                        text="  " + npc["display_name"],
+                        font=ctk.CTkFont(size=11),
+                        anchor="w"
+                    ).pack(side="left", padx=(10, 0))
+
+    def _get_favor_color(self, favor: str) -> str:
+        """Get color for favor level."""
+        colors = {
+            "Soul Mates": "#E040FB",
+            "Like Family": "#FF4081",
+            "Best Friends": "#FF5722",
+            "Close Friends": "#FF9800",
+            "Friends": "#4CAF50",
+            "Comfortable": "#8BC34A",
+            "Tolerated": "#9E9E9E",
+        }
+        return colors.get(favor, "#FFFFFF")
+
+    def _select_skill(self, skill: dict):
+        """Handle skill selection."""
+        self.selected_skill = skill
+        # Could show skill details in right panel
+        pass
+
+    def _refresh_storage_tab(self):
+        """Refresh the Storage tab content."""
+        if not hasattr(self, 'storage_tree'):
+            return
+
+        # Clear existing items
+        self.storage_tree.delete(*self.storage_tree.get_children())
+
+        # Load storage data
+        storage_data = self.reports_parser.load_storage()
+
+        if not storage_data:
+            self.storage_summary.configure(text="No storage data - export from game")
+            return
+
+        # Update vault dropdown
+        vaults = ["All"] + self.reports_parser.get_vault_names()
+        self.vault_dropdown.configure(values=vaults)
+
+        # Get items to display
+        search_query = self.storage_search_var.get().strip().lower()
+
+        if search_query:
+            items = self.reports_parser.search_items(search_query)
+        elif self.selected_vault == "All":
+            items = self.reports_parser.get_all_items()
+        else:
+            items_by_vault = self.reports_parser.get_items_by_vault()
+            items = items_by_vault.get(self.selected_vault, [])
+
+        # Update summary
+        total_value = sum(i.get("Value", 0) * i.get("StackSize", 1) for i in items)
+        self.storage_summary.configure(text=f"{len(items)} items - {total_value:,} gold")
+
+        # Insert all items into treeview (Treeview handles large lists efficiently)
+        for item in items:
+            name = item.get("Name", "Unknown")
+            stack = item.get("StackSize", 1)
+            vault = item.get("StorageVault", "")
+            rarity = item.get("Rarity", "Common").lower()
+
+            # Truncate vault name for display
+            vault_short = vault[:12] + ".." if len(vault) > 12 else vault
+
+            self.storage_tree.insert(
+                "", "end",
+                values=(name, stack, vault_short),
+                tags=(rarity,)
+            )
+
+        # Apply current sort order
+        if self.storage_sort_column:
+            self._apply_storage_sort()
+
+    def _apply_storage_sort(self):
+        """Apply current sort without toggling direction."""
+        column = self.storage_sort_column
+        ascending = self.storage_sort_state[column]
+
+        # Get all items with their values
+        items = []
+        for item_id in self.storage_tree.get_children():
+            values = self.storage_tree.item(item_id, "values")
+            tags = self.storage_tree.item(item_id, "tags")
+            items.append((item_id, values, tags))
+
+        # Sort based on column
+        col_index = {"name": 0, "qty": 1, "location": 2}[column]
+
+        if column == "qty":
+            items.sort(key=lambda x: int(x[1][col_index]), reverse=not ascending)
+        else:
+            items.sort(key=lambda x: x[1][col_index].lower(), reverse=not ascending)
+
+        # Reorder items in treeview
+        for idx, (item_id, values, tags) in enumerate(items):
+            self.storage_tree.move(item_id, "", idx)
+
+    def _get_rarity_color(self, rarity: str) -> str:
+        """Get color for item rarity."""
+        colors = {
+            "Common": "#FFFFFF",
+            "Uncommon": "#4CAF50",
+            "Rare": "#2196F3",
+            "Epic": "#9C27B0",
+            "Legendary": "#FF9800",
+        }
+        return colors.get(rarity, "#FFFFFF")
+
+    def _select_storage_item(self, item: dict):
+        """Handle storage item selection."""
+        self.selected_storage_item = item
+        # Could show item details in right panel
+        pass
+
+    def _refresh_quests_tab(self):
+        """Refresh the Quests tab content."""
+        if not hasattr(self, 'quests_scroll'):
+            return
+
+        # Clear existing content
+        for widget in self.quests_scroll.winfo_children():
+            widget.destroy()
+
+        # Load quest data
+        active_quests = self.reports_parser.get_active_quest_ids()
+
+        if not active_quests:
+            self.quests_status.configure(text="No active quests")
+            return
+
+        # Load quest database (may take time on first load)
+        quests_by_zone = self.reports_parser.get_quests_by_zone()
+
+        if not quests_by_zone:
+            self.quests_status.configure(text=f"{len(active_quests)} quests (loading details...)")
+
+            # Try to fetch quest database in background
+            def fetch_quests():
+                self.reports_parser.load_quest_database()
+                self.after(0, self._refresh_quests_tab)
+
+            threading.Thread(target=fetch_quests, daemon=True).start()
+            return
+
+        total_quests = sum(len(q) for q in quests_by_zone.values())
+        self.quests_status.configure(text=f"{total_quests} active quests")
+
+        # Get all item names for matching
+        all_items = self.reports_parser.get_all_item_names()
+
+        # Display quests grouped by zone
+        for zone in sorted(quests_by_zone.keys()):
+            quests = quests_by_zone[zone]
+
+            # Initialize zone expanded state
+            if zone not in self.quest_zone_expanded:
+                self.quest_zone_expanded[zone] = True
+
+            # Zone header
+            arrow = "\u25bc" if self.quest_zone_expanded[zone] else "\u25b6"
+            zone_btn = ctk.CTkButton(
+                self.quests_scroll,
+                text=f"{arrow} {zone} ({len(quests)})",
+                anchor="w",
+                fg_color=("gray85", "gray25"),
+                text_color=("gray10", "gray90"),
+                hover_color=("gray75", "gray35"),
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda z=zone: self._toggle_quest_zone(z)
+            )
+            zone_btn.pack(fill="x", pady=(5, 2))
+
+            if not self.quest_zone_expanded[zone]:
+                continue
+
+            # Display quests in this zone
+            for quest in quests:
+                quest_frame = ctk.CTkFrame(self.quests_scroll, fg_color="transparent")
+                quest_frame.pack(fill="x", padx=(15, 5), pady=2)
+
+                # Quest name
+                quest_name = quest.get("name", quest.get("id", "Unknown"))
+                name_text = quest_name[:35] + "..." if len(quest_name) > 35 else quest_name
+
+                ctk.CTkLabel(
+                    quest_frame,
+                    text=name_text,
+                    font=ctk.CTkFont(size=11),
+                    anchor="w"
+                ).pack(anchor="w")
+
+                # Display objectives if available
+                for obj in quest.get("objectives", [])[:3]:  # Show first 3 objectives
+                    obj_frame = ctk.CTkFrame(quest_frame, fg_color="transparent")
+                    obj_frame.pack(fill="x", padx=(10, 0))
+
+                    # Status indicator
+                    if obj.get("is_item"):
+                        has_item = obj.get("has_item", False)
+                        indicator = "\u2713" if has_item else "\u2717"
+                        color = "#4CAF50" if has_item else "#F44336"
+                    else:
+                        indicator = "?"
+                        color = "gray"
+
+                    ctk.CTkLabel(
+                        obj_frame,
+                        text=indicator,
+                        font=ctk.CTkFont(size=10),
+                        text_color=color,
+                        width=15
+                    ).pack(side="left")
+
+                    # Objective description (truncated)
+                    desc = obj.get("description", "")
+                    desc_text = desc[:40] + "..." if len(desc) > 40 else desc
+
+                    ctk.CTkLabel(
+                        obj_frame,
+                        text=desc_text,
+                        font=ctk.CTkFont(size=10),
+                        text_color="gray",
+                        anchor="w"
+                    ).pack(side="left", fill="x")
+
+    def _toggle_quest_zone(self, zone: str):
+        """Toggle quest zone expanded state."""
+        self.quest_zone_expanded[zone] = not self.quest_zone_expanded.get(zone, True)
+        self._refresh_quests_tab()
 
     def _create_detail_panel(self, parent):
         """Create the right panel with stacked detail and options views."""
