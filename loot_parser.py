@@ -5,7 +5,9 @@ Designed to be imported by CLI or GUI interfaces.
 
 import re
 import os
+import sys
 import json
+import urllib.request
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
@@ -61,6 +63,71 @@ ZONE_NAMES = {
     "ChooseCharacter": None,  # Not a zone
 }
 
+# Official Project Gorgon item database URL
+ITEMS_JSON_URL = "https://cdn.projectgorgon.com/v456/data/items.json"
+
+
+def load_valid_items(cache_dir: Path) -> set:
+    """Load valid item names from PG's official item database."""
+    items_set = set()
+
+    # Debug log file
+    debug_log = cache_dir / "item_cache_debug.log"
+    def log(msg):
+        with open(debug_log, 'a', encoding='utf-8') as f:
+            f.write(f"{datetime.now()}: {msg}\n")
+
+    log(f"load_valid_items called, frozen={getattr(sys, 'frozen', False)}")
+
+    # Check for bundled cache first (PyInstaller)
+    if getattr(sys, 'frozen', False):
+        bundled_cache = Path(sys._MEIPASS) / "items_cache.json"
+        log(f"Checking bundled cache at: {bundled_cache}")
+        log(f"Bundled cache exists: {bundled_cache.exists()}")
+        if bundled_cache.exists():
+            try:
+                with open(bundled_cache, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    items = set(data.get("names", []))
+                    log(f"Loaded {len(items)} items from bundled cache")
+                    return items
+            except Exception as e:
+                log(f"Error loading bundled cache: {e}")
+                pass
+
+    # Try to load from local cache
+    cache_file = cache_dir / "items_cache.json"
+    if cache_file.exists():
+        cache_age = datetime.now().timestamp() - cache_file.stat().st_mtime
+        if cache_age < 7 * 24 * 3600:  # 7 days
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    return set(data.get("names", []))
+            except:
+                pass
+
+    # Download fresh data
+    try:
+        req = urllib.request.Request(
+            ITEMS_JSON_URL,
+            headers={'User-Agent': 'GorgonTracker/1.0'}
+        )
+        with urllib.request.urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            for item_id, item_data in data.items():
+                if "Name" in item_data:
+                    items_set.add(item_data["Name"])
+
+            # Cache for later
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump({"names": list(items_set)}, f)
+    except Exception as e:
+        print(f"Warning: Could not load items database: {e}")
+
+    return items_set
+
 
 class LootParser:
     """Parses chat logs and extracts creature loot data."""
@@ -109,6 +176,11 @@ class LootParser:
 
         # Load processing state
         self.processed_state = self._load_state()
+
+        # Load valid item names from PG database
+        # Use absolute path to ensure cache is found regardless of working directory
+        cache_dir = self.data_file.resolve().parent
+        self.valid_items = load_valid_items(cache_dir)
 
     def _load_state(self) -> dict:
         """Load the processed logs state file."""
@@ -249,17 +321,42 @@ class LootParser:
         return False
 
     def strip_prefixes(self, item_name: str) -> str:
-        """Remove known modifier prefixes and suffixes from an item name to get the base name."""
-        # First strip suffixes (e.g., "of Daggering", "of the Winter Court")
+        """Find the base item name by matching against valid item database."""
+        # If we have valid items loaded, use smart matching
+        if self.valid_items:
+            # Try exact match on full name first (before stripping anything)
+            if item_name in self.valid_items:
+                return item_name
+
+            # Try stripping prefixes from the full name first
+            words = item_name.split()
+            for i in range(len(words)):
+                candidate = ' '.join(words[i:])
+                if candidate in self.valid_items:
+                    return candidate
+
+            # Now try stripping suffix pattern and repeat
+            name_no_suffix = SUFFIX_PATTERN.sub('', item_name)
+
+            # Try exact match on suffix-stripped name
+            if name_no_suffix in self.valid_items:
+                return name_no_suffix
+
+            # Try stripping prefixes from suffix-stripped name
+            words = name_no_suffix.split()
+            for i in range(len(words)):
+                candidate = ' '.join(words[i:])
+                if candidate in self.valid_items:
+                    return candidate
+
+            # No match found - return full item name (don't strip anything)
+            return item_name
+
+        # Fallback to old behavior if no valid items loaded
         name = SUFFIX_PATTERN.sub('', item_name)
-
-        # Then strip prefixes
         words = name.split()
-
-        # Keep removing prefixes from the start
         while words and words[0] in ALL_PREFIXES:
             words.pop(0)
-
         return ' '.join(words) if words else item_name
 
     def _record_kill(self, creature: str, zone: Optional[str] = None):
@@ -273,14 +370,25 @@ class LootParser:
 
         self.creature_data[creature]["kills"] += 1
 
+        # Update last_updated timestamp (UTC)
+        utc_now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.creature_data[creature]["last_updated"] = utc_now
+
         # Add zone if known and not already recorded
         if zone and zone not in self.creature_data[creature]["zones"]:
             self.creature_data[creature]["zones"].append(zone)
             self.creature_data[creature]["zones"].sort()
 
-    def _record_loot(self, creature: str, base_name: str, count: int = 1) -> bool:
+    def _record_loot(self, creature: str, base_name: str, count: int = 1,
+                     zone: Optional[str] = None) -> bool:
         """
         Record a loot drop. Returns True if this is a new item for this creature.
+
+        Args:
+            creature: The creature name
+            base_name: The base item name (prefixes stripped)
+            count: Number of items dropped
+            zone: Optional zone where the item dropped
         """
         if creature not in self.creature_data:
             self.creature_data[creature] = {"kills": 0, "zones": [], "items": {}, "skinning": {}}
@@ -297,11 +405,23 @@ class LootParser:
             items[base_name] = {
                 "count": count,
                 "first_seen": today,
-                "last_seen": today
+                "last_seen": today,
+                "zones": [zone] if zone else [],
+                "wiki_only": False
             }
         else:
             items[base_name]["count"] += count
             items[base_name]["last_seen"] = today
+            # Add zone if not already tracked
+            if zone:
+                item_zones = items[base_name].get("zones", [])
+                if zone not in item_zones:
+                    item_zones.append(zone)
+                    item_zones.sort()
+                    items[base_name]["zones"] = item_zones
+            # Ensure wiki_only flag exists (backwards compatibility)
+            if "wiki_only" not in items[base_name]:
+                items[base_name]["wiki_only"] = False
 
         return is_new
 
@@ -394,7 +514,8 @@ class LootParser:
 
                 # Associate with killed creature (regular loot)
                 if self.creature_killed and self.current_creature:
-                    is_new = self._record_loot(self.current_creature, base_name, count)
+                    is_new = self._record_loot(self.current_creature, base_name, count,
+                                               zone=self.current_zone)
                     return {
                         "type": "loot",
                         "creature": self.current_creature,
@@ -558,10 +679,7 @@ class LootParser:
             return "==Reported Loot==\nNo loot reported yet.\n"
 
         lines = ["==Reported Loot==", "{|"]
-
-        for item in sorted(items):
-            lines.append(f"| {{{{Loot|{item}}}}}")
-
+        lines.extend(self._format_loot_table(sorted(items)))
         lines.append("|}")
 
         return '\n'.join(lines) + '\n'
@@ -575,16 +693,51 @@ class LootParser:
                 updates.append((creature, file_path))
         return sorted(updates)
 
+    def _parse_log_timestamp_utc(self, timestamp_str: str) -> str:
+        """
+        Parse a log timestamp and convert to UTC ISO format.
+
+        Args:
+            timestamp_str: Timestamp from log like "25-02-07 14:30:00"
+
+        Returns:
+            UTC timestamp in ISO format like "2025-02-07T14:30:00Z"
+        """
+        try:
+            local_time = datetime.strptime(timestamp_str, "%y-%m-%d %H:%M:%S")
+            # Convert to UTC by subtracting the timezone offset
+            utc_time = local_time - timedelta(hours=self._timezone_offset_hours)
+            return utc_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            return None
+
+    def _is_timestamp_newer(self, new_timestamp: str, last_updated: str) -> bool:
+        """
+        Check if new_timestamp is newer than last_updated.
+
+        Args:
+            new_timestamp: UTC timestamp in ISO format
+            last_updated: UTC timestamp in ISO format (or None)
+
+        Returns:
+            True if new_timestamp is newer or last_updated is None
+        """
+        if not last_updated:
+            return True
+        if not new_timestamp:
+            return False
+        return new_timestamp > last_updated
+
     def full_rescan(self, callback=None) -> dict:
         """
-        Full rescan of all logs. Only adds NEW creatures/items, doesn't duplicate.
+        Full rescan of all logs. Only processes entries newer than last_updated.
         Returns stats about what was found.
         """
         if not self.chatlog_dir.exists():
             return {}
 
         log_files = sorted(self.chatlog_dir.glob("Chat-*.log"))
-        stats = {"new_creatures": 0, "new_items": 0, "new_skinning": 0}
+        stats = {"new_creatures": 0, "new_items": 0, "new_skinning": 0, "skipped_old": 0}
 
         for log_file in log_files:
             if callback:
@@ -614,6 +767,7 @@ class LootParser:
             creature_killed = False
             skinning_active = False
             current_zone = None
+            current_utc_timestamp = None
 
             with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
                 # First, try to find timezone offset from the login line
@@ -631,6 +785,9 @@ class LootParser:
                         continue
 
                     timestamp_str, channel, message = match.groups()
+
+                    # Parse timestamp to UTC for comparison
+                    current_utc_timestamp = self._parse_log_timestamp_utc(timestamp_str)
 
                     # Parse timestamp for zone lookup (only valid for current session)
                     if is_current_session:
@@ -651,6 +808,16 @@ class LootParser:
 
                         # Check for fatality
                         if self.FATALITY_PATTERN.search(message) and current_creature:
+                            # Check if this entry is newer than what we've already processed
+                            last_updated = None
+                            if current_creature in self.creature_data:
+                                last_updated = self.creature_data[current_creature].get("last_updated")
+
+                            if not self._is_timestamp_newer(current_utc_timestamp, last_updated):
+                                # Skip this entry - we've already processed it
+                                stats["skipped_old"] += 1
+                                continue
+
                             creature_killed = True
 
                             # Create creature entry if new
@@ -662,8 +829,11 @@ class LootParser:
                                 if callback:
                                     callback(f"  [NEW] {current_creature}")
 
-                            # Always increment kills
+                            # Increment kills
                             self.creature_data[current_creature]["kills"] += 1
+
+                            # Update last_updated timestamp
+                            self.creature_data[current_creature]["last_updated"] = current_utc_timestamp
 
                             # Add zone if not present
                             if current_zone:
@@ -681,7 +851,7 @@ class LootParser:
 
                         # Loot
                         loot_match = self.LOOT_PATTERN.match(message)
-                        if loot_match and current_creature and current_creature in self.creature_data:
+                        if loot_match and current_creature and creature_killed and current_creature in self.creature_data:
                             item_name = loot_match.group(1)
                             count = int(loot_match.group(2)) if loot_match.group(2) else 1
                             base_name = self.strip_prefixes(item_name)
@@ -699,22 +869,38 @@ class LootParser:
                                     skinning[base_name]["count"] += count
                                     skinning[base_name]["last_seen"] = today
                                 skinning_active = False
-                            elif creature_killed:
+                            else:
                                 # Regular loot
                                 items = self.creature_data[current_creature].setdefault("items", {})
                                 if base_name not in items:
                                     items[base_name] = {
-                                        "count": count, "first_seen": today, "last_seen": today
+                                        "count": count,
+                                        "first_seen": today,
+                                        "last_seen": today,
+                                        "zones": [current_zone] if current_zone else [],
+                                        "wiki_only": False
                                     }
                                     stats["new_items"] += 1
                                 else:
                                     items[base_name]["count"] += count
                                     items[base_name]["last_seen"] = today
+                                    # Add zone if not already tracked
+                                    if current_zone:
+                                        item_zones = items[base_name].get("zones", [])
+                                        if current_zone not in item_zones:
+                                            item_zones.append(current_zone)
+                                            item_zones.sort()
+                                            items[base_name]["zones"] = item_zones
+                                    # Ensure wiki_only flag exists
+                                    if "wiki_only" not in items[base_name]:
+                                        items[base_name]["wiki_only"] = False
 
         self._save_creature_data()
 
         if callback:
             callback(f"Rescan complete: {stats['new_creatures']} new creatures, {stats['new_items']} new items, {stats['new_skinning']} new skinning")
+            if stats["skipped_old"] > 0:
+                callback(f"  (Skipped {stats['skipped_old']} already-processed entries)")
 
         return stats
 
@@ -816,13 +1002,17 @@ class LootParser:
 
         for item_name, item_data in items.items():
             count = item_data.get("count", 0)
-            drop_rate = (count / kills * 100) if kills > 0 else 0
+            # wiki_only items don't count toward drop rate
+            wiki_only = item_data.get("wiki_only", False)
+            drop_rate = (count / kills * 100) if kills > 0 and not wiki_only else 0
 
             stats["items"][item_name] = {
                 "count": count,
                 "drop_rate": round(drop_rate, 2),
                 "first_seen": item_data.get("first_seen"),
-                "last_seen": item_data.get("last_seen")
+                "last_seen": item_data.get("last_seen"),
+                "zones": item_data.get("zones", []),
+                "wiki_only": wiki_only
             }
 
         for item_name, item_data in skinning.items():
@@ -837,3 +1027,267 @@ class LootParser:
             }
 
         return stats
+
+    def parse_wiki_loot(self, wiki_text: str) -> dict[str, list[str]]:
+        """
+        Parse wiki page content and extract loot items by zone.
+
+        Args:
+            wiki_text: The raw wiki page content
+
+        Returns:
+            Dict mapping zone names to lists of item names.
+            Special key "general" for zone-agnostic loot.
+        """
+        result = defaultdict(list)
+
+        # Patterns for parsing
+        loot_pattern = re.compile(r'\{\{Loot\|([^}|]+)(?:\|[^}]*)?\}\}')
+        # Match zone section headers like "==== [[Sun Vale]] Loot ===="
+        zone_header_pattern = re.compile(r'====\s*\[\[([^\]]+)\]\]\s*Loot\s*====', re.IGNORECASE)
+        # Match general loot header like "==== General Loot ===="
+        general_header_pattern = re.compile(r'====\s*General\s*Loot\s*====', re.IGNORECASE)
+        # Match section headers (any ==== header)
+        any_header_pattern = re.compile(r'====\s*.+?\s*====')
+
+        lines = wiki_text.split('\n')
+        current_zone = None  # None means we haven't seen a loot section yet
+
+        for line in lines:
+            # Check for zone-specific loot header
+            zone_match = zone_header_pattern.search(line)
+            if zone_match:
+                current_zone = zone_match.group(1)
+                continue
+
+            # Check for general loot header
+            if general_header_pattern.search(line):
+                current_zone = "general"
+                continue
+
+            # Check if we hit a different section (not a loot section)
+            if any_header_pattern.search(line) and not zone_header_pattern.search(line) and not general_header_pattern.search(line):
+                # If the header contains "Loot" but doesn't match our patterns, still treat as loot
+                if "loot" in line.lower():
+                    # Default to general for unrecognized loot sections
+                    current_zone = "general"
+                else:
+                    # Non-loot section - stop tracking
+                    current_zone = None
+                continue
+
+            # Extract loot items if we're in a loot section
+            if current_zone is not None:
+                for match in loot_pattern.finditer(line):
+                    item_name = match.group(1).strip()
+                    if item_name and item_name not in result[current_zone]:
+                        result[current_zone].append(item_name)
+
+        return dict(result)
+
+    def merge_wiki_items(self, creature: str, wiki_items: dict[str, list[str]]) -> dict:
+        """
+        Merge wiki items into creature data.
+        Items not in our database get added with count=0, wiki_only=True.
+
+        Args:
+            creature: The creature name
+            wiki_items: Dict mapping zone names to lists of item names
+
+        Returns:
+            Dict with merge statistics: {"added": int, "existing": int}
+        """
+        if creature not in self.creature_data:
+            self.creature_data[creature] = {"kills": 0, "zones": [], "items": {}, "skinning": {}}
+
+        items = self.creature_data[creature]["items"]
+        creature_zones = self.creature_data[creature].get("zones", [])
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        stats = {"added": 0, "existing": 0}
+
+        for zone, item_list in wiki_items.items():
+            # Determine the actual zone name (or None for general)
+            actual_zone = None if zone == "general" else zone
+
+            for item_name in item_list:
+                if item_name in items:
+                    # Item exists - add zone if not tracked
+                    stats["existing"] += 1
+                    if actual_zone:
+                        item_zones = items[item_name].get("zones", [])
+                        if actual_zone not in item_zones:
+                            item_zones.append(actual_zone)
+                            item_zones.sort()
+                            items[item_name]["zones"] = item_zones
+                else:
+                    # New item from wiki
+                    stats["added"] += 1
+                    items[item_name] = {
+                        "count": 0,
+                        "first_seen": today,
+                        "last_seen": today,
+                        "zones": [actual_zone] if actual_zone else [],
+                        "wiki_only": True
+                    }
+
+        # Save changes
+        self._save_creature_data()
+
+        return stats
+
+    def _format_loot_table(self, item_list: list[str], items_per_row: int = 4) -> list[str]:
+        """
+        Format a list of items into wiki table rows with line breaks every N items.
+
+        Args:
+            item_list: List of item names (should be pre-sorted)
+            items_per_row: Number of items per row before adding a line break
+
+        Returns:
+            List of lines for the wiki table (without {| and |})
+        """
+        lines = []
+        for i, item in enumerate(item_list):
+            lines.append(f"|{{{{Loot|{item}}}}}")
+            # Add row break after every N items, but not after the last item
+            if (i + 1) % items_per_row == 0 and i < len(item_list) - 1:
+                lines.append("|-")
+        return lines
+
+    def generate_wiki_syntax_with_zones(self, creature: str) -> str:
+        """
+        Generate wiki-formatted loot table syntax with zone-specific sections.
+
+        Args:
+            creature: The creature name
+
+        Returns:
+            Wiki syntax string with zone sections
+        """
+        if creature not in self.creature_data:
+            return "== Reported Loot ==\nNo loot reported yet.\n"
+
+        data = self.creature_data[creature]
+        items = data.get("items", {})
+        creature_zones = data.get("zones", [])
+        skinning = data.get("skinning", {})
+
+        if not items and not skinning:
+            return "== Reported Loot ==\nNo loot reported yet.\n"
+
+        # Categorize items by zone
+        general_items = []  # Items when creature has no zone
+        zone_items = defaultdict(list)  # Items for specific zones
+
+        for item_name, item_data in items.items():
+            item_zones = item_data.get("zones", [])
+
+            if not creature_zones:
+                # Creature has no zone data - all items go to general
+                general_items.append(item_name)
+            elif item_zones:
+                # Item has zone data - put in those zones
+                for zone in item_zones:
+                    zone_items[zone].append(item_name)
+            else:
+                # Item has no zone but creature does - use creature's zones
+                for zone in creature_zones:
+                    zone_items[zone].append(item_name)
+
+        lines = ["== Reported Loot ==", ""]
+
+        # General loot section
+        if general_items:
+            lines.append("==== General Loot ====")
+            lines.append("{|")
+            lines.extend(self._format_loot_table(sorted(general_items)))
+            lines.append("|}")
+            lines.append("")
+
+        # Zone-specific sections
+        for zone in sorted(zone_items.keys()):
+            zone_item_list = zone_items[zone]
+            if zone_item_list:
+                lines.append(f"==== [[{zone}]] Loot ====")
+                lines.append("{|")
+                lines.extend(self._format_loot_table(sorted(zone_item_list)))
+                lines.append("|}")
+                lines.append("")
+
+        # Skinning section
+        if skinning:
+            lines.append("== Skinning ==")
+            lines.append("{|")
+            lines.extend(self._format_loot_table(sorted(skinning.keys())))
+            lines.append("|}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def insert_loot_into_wiki(self, creature: str, wiki_text: str) -> str:
+        """
+        Insert or replace the loot section in existing wiki content.
+
+        Args:
+            creature: The creature name
+            wiki_text: The original wiki page content
+
+        Returns:
+            Updated wiki content with our loot data inserted
+        """
+        # Generate our loot syntax
+        our_loot = self.generate_wiki_syntax_with_zones(creature)
+
+        # Pattern to find the "Reported Loot" section
+        # Match "== Reported Loot ==" or similar (allowing whitespace variations)
+        loot_section_pattern = re.compile(
+            r'^(==\s*Reported\s+Loot\s*==)',
+            re.MULTILINE | re.IGNORECASE
+        )
+
+        # Find the start of the loot section
+        loot_match = loot_section_pattern.search(wiki_text)
+
+        if loot_match:
+            # Find where this section ends (next == section or end of content)
+            section_start = loot_match.start()
+
+            # Look for next == heading (but not === or ====)
+            # We need to find "==" at start of line that's not "===" or more
+            next_section_pattern = re.compile(r'^==[^=]', re.MULTILINE)
+            remaining_text = wiki_text[loot_match.end():]
+            next_match = next_section_pattern.search(remaining_text)
+
+            if next_match:
+                # There's another section after loot
+                section_end = loot_match.end() + next_match.start()
+                before = wiki_text[:section_start]
+                after = wiki_text[section_end:]
+                return before + our_loot + "\n" + after
+            else:
+                # Loot section goes to the end
+                before = wiki_text[:section_start]
+                return before + our_loot
+
+        # No existing loot section found - try to find a good place to insert
+        # Look for common section patterns and insert before them
+        insert_before_patterns = [
+            r'^==\s*Skinning\s*==',
+            r'^==\s*Butchering\s*==',
+            r'^==\s*Anatomy\s*==',
+            r'^==\s*Notes\s*==',
+            r'^==\s*Trivia\s*==',
+            r'^==\s*References\s*==',
+            r'^==\s*See Also\s*==',
+        ]
+
+        for pattern in insert_before_patterns:
+            match = re.search(pattern, wiki_text, re.MULTILINE | re.IGNORECASE)
+            if match:
+                before = wiki_text[:match.start()]
+                after = wiki_text[match.start():]
+                return before + our_loot + "\n\n" + after
+
+        # No good insertion point found - append at the end
+        return wiki_text.rstrip() + "\n\n" + our_loot

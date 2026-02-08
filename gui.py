@@ -17,7 +17,10 @@ from dotenv import load_dotenv
 import customtkinter as ctk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
-from loot_parser import LootParser
+from loot_parser import LootParser, ZONE_NAMES
+
+# List of valid zone display names for dropdown
+VALID_ZONES = sorted([name for name in ZONE_NAMES.values() if name is not None])
 
 # Settings file path
 SETTINGS_FILE = Path("gui_settings.json")
@@ -43,6 +46,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.parser = None
         self.selected_creature = None
         self.creature_buttons = {}
+        self.creature_zone_labels = {}
 
         # Options state
         self.showing_options = False
@@ -283,9 +287,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         main_frame = ctk.CTkFrame(self)
         main_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        # Configure grid
-        main_frame.grid_columnconfigure(0, weight=1)
-        main_frame.grid_columnconfigure(1, weight=1)
+        # Configure grid - uniform ensures both columns stay same size
+        main_frame.grid_columnconfigure(0, weight=1, uniform="main_cols", minsize=300)
+        main_frame.grid_columnconfigure(1, weight=1, uniform="main_cols", minsize=300)
         main_frame.grid_rowconfigure(0, weight=1)
 
         # Left panel - Creature list
@@ -374,13 +378,28 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.detail_name.pack(anchor="w")
 
+        # Info row with zone and kills
+        self.detail_info_frame = ctk.CTkFrame(self.detail_header, fg_color="transparent")
+        # Don't pack yet - will be shown when creature selected
+
+        # Zone dropdown (for unknown zones)
+        self.zone_dropdown = ctk.CTkOptionMenu(
+            self.detail_info_frame,
+            values=VALID_ZONES,
+            width=120,
+            height=24,
+            font=ctk.CTkFont(size=11),
+            command=self._on_zone_changed
+        )
+
+        # Initial placeholder label
         self.detail_info = ctk.CTkLabel(
             self.detail_header,
             text="Select a creature to view loot",
             font=ctk.CTkFont(size=12),
             text_color="gray"
         )
-        self.detail_info.pack(anchor="w", pady=(5, 0))
+        self.detail_info.pack(anchor="w")
 
         # Tab view for Info and Wiki
         self.detail_tabs = ctk.CTkTabview(self.detail_content, height=300)
@@ -404,7 +423,16 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         # Wiki tab
         self.wiki_tab = self.detail_tabs.add("Wiki")
 
-        # Wiki syntax textbox (read-only but selectable)
+        # Instructions label
+        self.wiki_instruction = ctk.CTkLabel(
+            self.wiki_tab,
+            text="Paste the current wiki page content below, then click Sync to merge with our data.",
+            font=ctk.CTkFont(size=12),
+            text_color="gray"
+        )
+        self.wiki_instruction.pack(fill="x", padx=5, pady=(5, 5))
+
+        # Wiki syntax textbox (editable for paste)
         self.wiki_textbox = ctk.CTkTextbox(
             self.wiki_tab,
             font=ctk.CTkFont(family="Consolas", size=12),
@@ -412,7 +440,28 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.wiki_textbox.pack(fill="both", expand=True, padx=5, pady=5)
         self.wiki_textbox.insert("1.0", "Select a creature to view wiki syntax")
-        self.wiki_textbox.configure(state="disabled")
+
+        # Button frame for Sync
+        wiki_button_frame = ctk.CTkFrame(self.wiki_tab, fg_color="transparent")
+        wiki_button_frame.pack(fill="x", padx=5, pady=(0, 5))
+
+        self.wiki_sync_button = ctk.CTkButton(
+            wiki_button_frame,
+            text="Sync",
+            command=self._sync_wiki,
+            width=100,
+            height=32,
+            font=ctk.CTkFont(size=13, weight="bold")
+        )
+        self.wiki_sync_button.pack(side="left")
+
+        self.wiki_status = ctk.CTkLabel(
+            wiki_button_frame,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color="#4CAF50"
+        )
+        self.wiki_status.pack(side="left", padx=10)
 
     def _create_options_view(self):
         """Create the options view."""
@@ -965,8 +1014,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _create_status_log(self):
         """Create the status log at the bottom."""
-        log_frame = ctk.CTkFrame(self)
+        log_frame = ctk.CTkFrame(self, height=150)
         log_frame.pack(fill="x", padx=10, pady=(0, 10))
+        log_frame.pack_propagate(False)  # Prevent resizing based on content
 
         ctk.CTkLabel(
             log_frame,
@@ -976,10 +1026,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         self.status_log = ctk.CTkTextbox(
             log_frame,
-            height=120,
             font=ctk.CTkFont(family="Consolas", size=11)
         )
-        self.status_log.pack(fill="x", padx=10, pady=(5, 10))
+        self.status_log.pack(fill="both", expand=True, padx=10, pady=(5, 10))
         self.status_log.configure(state="disabled")
 
     def _log_message(self, message: str):
@@ -1101,6 +1150,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         for widget in self.creature_scroll.winfo_children():
             widget.destroy()
         self.creature_buttons.clear()
+        self.creature_zone_labels.clear()
 
         # Sort creatures by kill count (descending)
         creatures = sorted(
@@ -1143,14 +1193,16 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 font=ctk.CTkFont(size=12)
             ).pack(side="left")
 
-            ctk.CTkLabel(
+            zone_label = ctk.CTkLabel(
                 row,
                 text=zone_text[:12],
                 width=100,
                 anchor="w",
                 font=ctk.CTkFont(size=11),
                 text_color="gray"
-            ).pack(side="left")
+            )
+            zone_label.pack(side="left")
+            self.creature_zone_labels[creature_name] = zone_label
 
     def _select_creature(self, creature_name: str):
         """Select a creature and display its loot details."""
@@ -1178,11 +1230,41 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         # Update header
         self.detail_name.configure(text=creature_name)
 
-        zones_text = ", ".join(stats["zones"]) if stats["zones"] else "Unknown"
-        self.detail_info.configure(
-            text=f"Zone: {zones_text}  |  Kills: {stats['kills']}",
-            text_color=("gray30", "gray70")
-        )
+        # Clear and rebuild the info frame
+        for widget in self.detail_info_frame.winfo_children():
+            widget.pack_forget()
+
+        # Build zone display
+        if stats["zones"]:
+            # Zone is known - show as text
+            zones_text = ", ".join(stats["zones"])
+            zone_display = f"Zone: {zones_text}  |  Kills: {stats['kills']}"
+            self.detail_info.configure(text=zone_display, text_color=("gray30", "gray70"))
+            self.detail_info.pack(anchor="w")
+            self.detail_info_frame.pack_forget()
+        else:
+            # Zone is unknown - show dropdown
+            self.detail_info.pack_forget()
+            self.detail_info_frame.pack(anchor="w", pady=(5, 0))
+
+            zone_prefix = ctk.CTkLabel(
+                self.detail_info_frame,
+                text="Zone: ",
+                font=ctk.CTkFont(size=12),
+                text_color=("gray30", "gray70")
+            )
+            zone_prefix.pack(side="left")
+
+            self.zone_dropdown.set("Unknown")
+            self.zone_dropdown.pack(side="left")
+
+            kills_label = ctk.CTkLabel(
+                self.detail_info_frame,
+                text=f"  |  Kills: {stats['kills']}",
+                font=ctk.CTkFont(size=12),
+                text_color=("gray30", "gray70")
+            )
+            kills_label.pack(side="left")
 
         # Clear sections
         for widget in self.loot_section.winfo_children():
@@ -1204,44 +1286,142 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             stats.get("skinning", {})
         )
 
-        # Populate wiki tab
-        self._update_wiki_syntax(creature_name, stats)
+        # Clear wiki tab for user input
+        self._clear_wiki_for_input()
+
+    def _on_zone_changed(self, zone: str):
+        """Handle zone selection from dropdown."""
+        if not self.selected_creature or not self.parser or zone == "Unknown":
+            return
+
+        # Update creature's zone in the data
+        if self.selected_creature in self.parser.creature_data:
+            creature_data = self.parser.creature_data[self.selected_creature]
+            if zone not in creature_data.get("zones", []):
+                if "zones" not in creature_data:
+                    creature_data["zones"] = []
+                creature_data["zones"].append(zone)
+                creature_data["zones"].sort()
+
+            # Also update all items that have no zone to use this zone
+            items = creature_data.get("items", {})
+            for item_name, item_data in items.items():
+                if not item_data.get("zones"):
+                    item_data["zones"] = [zone]
+
+            # Save the data
+            self.parser._save_creature_data()
+
+            # Update the creature list zone label
+            if self.selected_creature in self.creature_zone_labels:
+                self.creature_zone_labels[self.selected_creature].configure(text=zone[:12])
+
+            # Refresh the detail view to show zone as text
+            self._select_creature(self.selected_creature)
+
+            self._log_message(f"Set zone for {self.selected_creature} to {zone}")
+
+    def _clear_wiki_for_input(self):
+        """Clear wiki textbox and show placeholder for user input."""
+        self.wiki_textbox.configure(state="normal")
+        self.wiki_textbox.delete("1.0", "end")
+        # Leave empty - the instruction label above already tells user what to do
 
     def _update_wiki_syntax(self, creature_name: str, stats: dict):
-        """Update the wiki syntax textbox."""
-        items = sorted(stats.get("items", {}).keys())
-        skinning_items = sorted(stats.get("skinning", {}).keys())
+        """Update the wiki syntax textbox with zone-aware output."""
+        # Use the new zone-aware generator from the parser
+        wiki_text = self.parser.generate_wiki_syntax_with_zones(creature_name)
 
-        lines = []
-        lines.append(f"<!-- {creature_name} - Loot Data -->")
-        lines.append(f"<!-- Kills: {stats['kills']} -->")
-        lines.append("")
-
-        # Loot section
-        if items:
-            lines.append("==Reported Loot==")
-            lines.append("{|")
-            for item in items:
-                lines.append(f"| {{{{Loot|{item}}}}}")
-            lines.append("|}")
-            lines.append("")
-
-        # Skinning section
-        if skinning_items:
-            lines.append("==Skinning==")
-            lines.append("{|")
-            for item in skinning_items:
-                lines.append(f"| {{{{Loot|{item}}}}}")
-            lines.append("|}")
-            lines.append("")
-
-        wiki_text = "\n".join(lines)
+        # Add metadata comment at top
+        header = f"<!-- {creature_name} - Loot Data -->\n"
+        header += f"<!-- Kills: {stats['kills']} -->\n\n"
 
         # Update textbox
         self.wiki_textbox.configure(state="normal")
         self.wiki_textbox.delete("1.0", "end")
-        self.wiki_textbox.insert("1.0", wiki_text)
-        self.wiki_textbox.configure(state="normal")  # Keep editable for copy/paste
+        self.wiki_textbox.insert("1.0", header + wiki_text)
+        # Keep editable for paste/copy
+
+    def _sync_wiki(self):
+        """Sync pasted wiki content with our database."""
+        if self.parser is None or self.selected_creature is None:
+            self.wiki_status.configure(text="Select a creature first", text_color="#F44336")
+            self.after(3000, lambda: self.wiki_status.configure(text=""))
+            return
+
+        # Get the wiki text from the textbox
+        wiki_text = self.wiki_textbox.get("1.0", "end-1c")
+
+        if not wiki_text.strip():
+            self.wiki_status.configure(text="No content to sync", text_color="#F44336")
+            self.after(3000, lambda: self.wiki_status.configure(text=""))
+            return
+
+        # Parse the wiki content
+        wiki_items = self.parser.parse_wiki_loot(wiki_text)
+
+        if not wiki_items:
+            self.wiki_status.configure(text="No loot items found in wiki content", text_color="#FF9800")
+            self.after(3000, lambda: self.wiki_status.configure(text=""))
+            return
+
+        # Merge with our database
+        merge_stats = self.parser.merge_wiki_items(self.selected_creature, wiki_items)
+
+        # Insert our loot data into the wiki content (preserving other sections)
+        updated_wiki = self.parser.insert_loot_into_wiki(self.selected_creature, wiki_text)
+
+        # Update the textbox with merged content
+        self.wiki_textbox.configure(state="normal")
+        self.wiki_textbox.delete("1.0", "end")
+        self.wiki_textbox.insert("1.0", updated_wiki)
+
+        # Refresh the info tab to show new items
+        self._refresh_loot_display()
+
+        # Show status
+        added = merge_stats["added"]
+        existing = merge_stats["existing"]
+        if added > 0:
+            self.wiki_status.configure(
+                text=f"Synced: {added} new items added, {existing} existing",
+                text_color="#4CAF50"
+            )
+            self._log_message(f"Wiki sync for {self.selected_creature}: +{added} new items")
+        else:
+            self.wiki_status.configure(
+                text=f"Synced: All {existing} items already in database",
+                text_color="#4CAF50"
+            )
+
+        self.after(5000, lambda: self.wiki_status.configure(text=""))
+
+    def _refresh_loot_display(self):
+        """Refresh the loot display for the currently selected creature."""
+        if self.selected_creature is None:
+            return
+
+        stats = self.parser.get_creature_stats(self.selected_creature)
+        if not stats:
+            return
+
+        # Clear and repopulate sections
+        for widget in self.loot_section.winfo_children():
+            widget.destroy()
+        for widget in self.skinning_section.winfo_children():
+            widget.destroy()
+
+        self._populate_item_section(
+            self.loot_section,
+            "Loot Drops",
+            stats["items"]
+        )
+
+        self._populate_item_section(
+            self.skinning_section,
+            "Skinning",
+            stats.get("skinning", {})
+        )
 
     def _populate_item_section(self, parent, title: str, items: dict):
         """Populate a section with item data using a resizable Treeview."""
@@ -1282,11 +1462,10 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
 
-        # Sort items by drop rate (descending)
+        # Sort items: wiki_only items at the end, then by drop rate (descending)
         sorted_items = sorted(
             items.items(),
-            key=lambda x: x[1]["drop_rate"],
-            reverse=True
+            key=lambda x: (x[1].get("wiki_only", False), -x[1]["drop_rate"])
         )
 
         # Configure tags for rate colors
@@ -1295,25 +1474,35 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         tree.tag_configure("rate_yellow", foreground="#FFC107")
         tree.tag_configure("rate_orange", foreground="#FF9800")
         tree.tag_configure("rate_red", foreground="#F44336")
+        tree.tag_configure("wiki_only", foreground="#9E9E9E")  # Gray for wiki-only items
 
         # Insert items
         for item_name, item_data in sorted_items:
             rate = item_data["drop_rate"]
-            rate_text = f"{rate:.1f}%" if rate < 100 else "100%"
+            wiki_only = item_data.get("wiki_only", False)
 
-            # Determine tag based on rate
-            if rate >= 50:
-                tag = "rate_green"
-            elif rate >= 20:
-                tag = "rate_light_green"
-            elif rate >= 10:
-                tag = "rate_yellow"
-            elif rate >= 5:
-                tag = "rate_orange"
+            if wiki_only:
+                # Wiki-only items show "wiki" instead of rate
+                rate_text = "wiki"
+                tag = "wiki_only"
+                display_name = item_name
             else:
-                tag = "rate_red"
+                rate_text = f"{rate:.1f}%" if rate < 100 else "100%"
+                display_name = item_name
 
-            tree.insert("", "end", values=(item_name, item_data["count"], rate_text), tags=(tag,))
+                # Determine tag based on rate
+                if rate >= 50:
+                    tag = "rate_green"
+                elif rate >= 20:
+                    tag = "rate_light_green"
+                elif rate >= 10:
+                    tag = "rate_yellow"
+                elif rate >= 5:
+                    tag = "rate_orange"
+                else:
+                    tag = "rate_red"
+
+            tree.insert("", "end", values=(display_name, item_data["count"], rate_text), tags=(tag,))
 
         # Pack treeview and scrollbar
         tree.pack(side="left", fill="both", expand=True)
