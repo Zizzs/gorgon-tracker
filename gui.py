@@ -175,6 +175,11 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             background=[("active", "#404040")]
         )
 
+        # Remove the border/frame around the Treeview
+        style.layout("Dark.Treeview", [
+            ('Dark.Treeview.treearea', {'sticky': 'nswe'})
+        ])
+
     def _create_widgets(self):
         """Create the main UI layout."""
         if self.parser is None:
@@ -1439,14 +1444,14 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         tree_frame = ctk.CTkFrame(parent, fg_color="transparent")
         tree_frame.pack(fill="both", expand=True, padx=5, pady=(0, 10))
 
-        # Create Treeview with columns
+        # Create Treeview with columns - no height limit, let outer scroll handle it
         columns = ("item", "count", "rate")
         tree = ttk.Treeview(
             tree_frame,
             columns=columns,
             show="headings",
             style="Dark.Treeview",
-            height=min(len(items), 10)  # Show up to 10 rows before scrolling
+            height=len(items)  # Show all items, outer scrollframe handles scrolling
         )
 
         # Configure columns
@@ -1457,10 +1462,6 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         tree.column("item", width=180, minwidth=100, anchor="w")
         tree.column("count", width=60, minwidth=45, anchor="center")
         tree.column("rate", width=70, minwidth=50, anchor="center")
-
-        # Add scrollbar if needed
-        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
 
         # Sort items: wiki_only items at the end, then by drop rate (descending)
         sorted_items = sorted(
@@ -1504,10 +1505,8 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
             tree.insert("", "end", values=(display_name, item_data["count"], rate_text), tags=(tag,))
 
-        # Pack treeview and scrollbar
+        # Pack treeview (no scrollbar - outer scrollframe handles scrolling)
         tree.pack(side="left", fill="both", expand=True)
-        if len(items) > 10:
-            scrollbar.pack(side="right", fill="y")
 
     def _get_rate_color(self, rate: float) -> str:
         """Get color based on drop rate."""

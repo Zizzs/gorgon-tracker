@@ -161,6 +161,8 @@ class LootParser:
         self.creature_killed = False
         self.current_zone: Optional[str] = None
         self.skinning_active = False  # True after skinning XP message
+        self.kill_timestamp: Optional[datetime] = None  # When the kill happened
+        self.loot_window_seconds = 30  # Max seconds after kill to attribute loot
 
         # Zone transitions parsed from Player.log (time -> zone)
         self.zone_transitions: list[tuple[datetime, str]] = []
@@ -460,7 +462,8 @@ class LootParser:
 
         timestamp_str, channel, message = match.groups()
 
-        # Parse timestamp for zone lookup
+        # Parse timestamp for zone lookup and loot window check
+        timestamp = None
         try:
             timestamp = datetime.strptime(timestamp_str, "%y-%m-%d %H:%M:%S")
             self.current_zone = self._get_zone_at_time(timestamp)
@@ -476,11 +479,13 @@ class LootParser:
                 if creature_name != self.current_creature:
                     self.current_creature = creature_name
                     self.creature_killed = False
+                    self.kill_timestamp = None
                 return {"type": "combat", "creature": creature_name, "zone": self.current_zone}
 
             # Check for fatality
             if self.FATALITY_PATTERN.search(message):
                 self.creature_killed = True
+                self.kill_timestamp = timestamp
                 if self.current_creature:
                     self._record_kill(self.current_creature, self.current_zone)
                 return {"type": "kill", "creature": self.current_creature, "zone": self.current_zone}
@@ -498,8 +503,14 @@ class LootParser:
                 count = int(loot_match.group(2)) if loot_match.group(2) else 1
                 base_name = self.strip_prefixes(item_name)
 
-                # Check if this is skinning loot
-                if self.skinning_active and self.current_creature:
+                # Check if we're within the loot window (30 seconds after kill)
+                in_loot_window = False
+                if self.creature_killed and self.kill_timestamp and timestamp:
+                    time_since_kill = (timestamp - self.kill_timestamp).total_seconds()
+                    in_loot_window = 0 <= time_since_kill <= self.loot_window_seconds
+
+                # Check if this is skinning loot (skinning is valid within loot window)
+                if self.skinning_active and self.current_creature and in_loot_window:
                     is_new = self._record_skinning(self.current_creature, base_name, count)
                     self.skinning_active = False  # Reset after capturing
                     return {
@@ -512,8 +523,8 @@ class LootParser:
                         "zone": self.current_zone
                     }
 
-                # Associate with killed creature (regular loot)
-                if self.creature_killed and self.current_creature:
+                # Associate with killed creature (regular loot) only if in loot window
+                if in_loot_window and self.current_creature:
                     is_new = self._record_loot(self.current_creature, base_name, count,
                                                zone=self.current_zone)
                     return {
@@ -525,6 +536,9 @@ class LootParser:
                         "is_new": is_new,
                         "zone": self.current_zone
                     }
+
+                # Reset skinning flag even if not in loot window
+                self.skinning_active = False
 
         return None
 
@@ -630,6 +644,7 @@ class LootParser:
             self.creature_killed = False
             self.current_zone = None
             self.skinning_active = False
+            self.kill_timestamp = None
 
             new_loot = self.parse_log_file(log_file, callback)
 
@@ -768,6 +783,7 @@ class LootParser:
             skinning_active = False
             current_zone = None
             current_utc_timestamp = None
+            kill_timestamp = None  # Track when the kill happened for loot window
 
             with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
                 # First, try to find timezone offset from the login line
@@ -797,6 +813,13 @@ class LootParser:
                         except ValueError:
                             pass
 
+                    # Parse timestamp for loot window checking
+                    current_timestamp = None
+                    try:
+                        current_timestamp = datetime.strptime(timestamp_str, "%y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        pass
+
                     if channel == "Combat":
                         # Check for combat target
                         target_match = self.COMBAT_TARGET_PATTERN.search(message)
@@ -805,6 +828,7 @@ class LootParser:
                             if new_creature != current_creature:
                                 current_creature = new_creature
                                 creature_killed = False
+                                kill_timestamp = None
 
                         # Check for fatality
                         if self.FATALITY_PATTERN.search(message) and current_creature:
@@ -819,6 +843,7 @@ class LootParser:
                                 continue
 
                             creature_killed = True
+                            kill_timestamp = current_timestamp
 
                             # Create creature entry if new
                             if current_creature not in self.creature_data:
@@ -849,9 +874,15 @@ class LootParser:
                             skinning_active = True
                             continue
 
-                        # Loot
+                        # Check if we're within the loot window (30 seconds after kill)
+                        in_loot_window = False
+                        if creature_killed and kill_timestamp and current_timestamp:
+                            time_since_kill = (current_timestamp - kill_timestamp).total_seconds()
+                            in_loot_window = 0 <= time_since_kill <= self.loot_window_seconds
+
+                        # Loot - only attribute if within loot window
                         loot_match = self.LOOT_PATTERN.match(message)
-                        if loot_match and current_creature and creature_killed and current_creature in self.creature_data:
+                        if loot_match and current_creature and in_loot_window and current_creature in self.creature_data:
                             item_name = loot_match.group(1)
                             count = int(loot_match.group(2)) if loot_match.group(2) else 1
                             base_name = self.strip_prefixes(item_name)
@@ -1227,67 +1258,121 @@ class LootParser:
 
     def insert_loot_into_wiki(self, creature: str, wiki_text: str) -> str:
         """
-        Insert or replace the loot section in existing wiki content.
+        Insert NEW items into existing wiki content without removing or moving existing items.
+
+        This is additive only - we preserve all existing wiki content and only add
+        items that we have but the wiki doesn't.
 
         Args:
             creature: The creature name
             wiki_text: The original wiki page content
 
         Returns:
-            Updated wiki content with our loot data inserted
+            Updated wiki content with new items added
         """
-        # Generate our loot syntax
-        our_loot = self.generate_wiki_syntax_with_zones(creature)
+        if creature not in self.creature_data:
+            return wiki_text
 
-        # Pattern to find the "Reported Loot" section
-        # Match "== Reported Loot ==" or similar (allowing whitespace variations)
-        loot_section_pattern = re.compile(
-            r'^(==\s*Reported\s+Loot\s*==)',
-            re.MULTILINE | re.IGNORECASE
-        )
+        # Parse existing wiki items
+        wiki_items = self.parse_wiki_loot(wiki_text)
+        all_wiki_items = set()
+        for zone_items in wiki_items.values():
+            all_wiki_items.update(zone_items)
 
-        # Find the start of the loot section
-        loot_match = loot_section_pattern.search(wiki_text)
+        # Get our items
+        data = self.creature_data[creature]
+        our_items = set(data.get("items", {}).keys())
+        creature_zones = data.get("zones", [])
 
-        if loot_match:
-            # Find where this section ends (next == section or end of content)
-            section_start = loot_match.start()
+        # Find items we have that wiki doesn't
+        new_items = our_items - all_wiki_items
 
-            # Look for next == heading (but not === or ====)
-            # We need to find "==" at start of line that's not "===" or more
-            next_section_pattern = re.compile(r'^==[^=]', re.MULTILINE)
-            remaining_text = wiki_text[loot_match.end():]
-            next_match = next_section_pattern.search(remaining_text)
+        if not new_items:
+            # Nothing new to add
+            return wiki_text
 
-            if next_match:
-                # There's another section after loot
-                section_end = loot_match.end() + next_match.start()
-                before = wiki_text[:section_start]
-                after = wiki_text[section_end:]
-                return before + our_loot + "\n" + after
+        # Categorize new items by zone
+        general_new = []
+        zone_new = defaultdict(list)
+
+        for item_name in new_items:
+            item_data = data["items"].get(item_name, {})
+            item_zones = item_data.get("zones", [])
+
+            if not creature_zones:
+                # Creature has no zone - add to general
+                general_new.append(item_name)
+            elif item_zones:
+                # Item has zone data
+                for zone in item_zones:
+                    zone_new[zone].append(item_name)
             else:
-                # Loot section goes to the end
-                before = wiki_text[:section_start]
-                return before + our_loot
+                # Item has no zone but creature does - use creature's zones
+                for zone in creature_zones:
+                    zone_new[zone].append(item_name)
 
-        # No existing loot section found - try to find a good place to insert
-        # Look for common section patterns and insert before them
-        insert_before_patterns = [
-            r'^==\s*Skinning\s*==',
-            r'^==\s*Butchering\s*==',
-            r'^==\s*Anatomy\s*==',
-            r'^==\s*Notes\s*==',
-            r'^==\s*Trivia\s*==',
-            r'^==\s*References\s*==',
-            r'^==\s*See Also\s*==',
-        ]
+        # Now we need to insert these new items into the appropriate sections
+        result = wiki_text
 
-        for pattern in insert_before_patterns:
-            match = re.search(pattern, wiki_text, re.MULTILINE | re.IGNORECASE)
+        # Helper to format items for insertion (with line breaks every 4 items)
+        def format_new_items(items):
+            sorted_items = sorted(items)
+            lines = []
+            for i, item in enumerate(sorted_items):
+                lines.append(f"|{{{{Loot|{item}}}}}")
+                # Add row break after every 4 items, but not after the last item
+                if (i + 1) % 4 == 0 and i < len(sorted_items) - 1:
+                    lines.append("|-")
+            return "\n".join(lines)
+
+        # Insert into General Loot section if we have general items
+        if general_new:
+            general_pattern = re.compile(r'(====\s*General\s*Loot\s*====.*?)(\|})', re.DOTALL | re.IGNORECASE)
+            match = general_pattern.search(result)
             if match:
-                before = wiki_text[:match.start()]
-                after = wiki_text[match.start():]
-                return before + our_loot + "\n\n" + after
+                # Insert before the closing |}
+                insert_point = match.end(2) - 2  # Before |}
+                new_content = "\n|-\n" + format_new_items(general_new) + "\n"
+                result = result[:insert_point] + new_content + result[insert_point:]
+            else:
+                # No General Loot section - need to create one or add to existing Reported Loot
+                loot_section = re.search(r'^==\s*Reported\s+Loot\s*==', result, re.MULTILINE | re.IGNORECASE)
+                if loot_section:
+                    # Add General Loot section after Reported Loot header
+                    insert_point = loot_section.end()
+                    new_section = "\n==== General Loot ====\n{|\n" + format_new_items(general_new) + "\n|}\n"
+                    result = result[:insert_point] + new_section + result[insert_point:]
 
-        # No good insertion point found - append at the end
-        return wiki_text.rstrip() + "\n\n" + our_loot
+        # Insert into zone-specific sections
+        for zone, items in zone_new.items():
+            if not items:
+                continue
+
+            # Look for existing zone section
+            zone_pattern = re.compile(
+                rf'(====\s*\[\[{re.escape(zone)}\]\]\s*Loot\s*====.*?)(\|}})',
+                re.DOTALL | re.IGNORECASE
+            )
+            match = zone_pattern.search(result)
+
+            if match:
+                # Insert before the closing |}
+                insert_point = match.end(2) - 2
+                new_content = "\n|-\n" + format_new_items(items) + "\n"
+                result = result[:insert_point] + new_content + result[insert_point:]
+            else:
+                # No zone section exists - create one
+                # Find the end of the Reported Loot section to insert before it ends
+                loot_section = re.search(r'^==\s*Reported\s+Loot\s*==', result, re.MULTILINE | re.IGNORECASE)
+                if loot_section:
+                    # Find the next == section (end of Reported Loot)
+                    next_section = re.search(r'^==[^=]', result[loot_section.end():], re.MULTILINE)
+                    if next_section:
+                        insert_point = loot_section.end() + next_section.start()
+                    else:
+                        insert_point = len(result)
+
+                    new_section = f"\n==== [[{zone}]] Loot ====\n{{|}}\n" + format_new_items(items) + "\n|}\n"
+                    result = result[:insert_point] + new_section + result[insert_point:]
+
+        return result
