@@ -442,9 +442,25 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.detail_name = ctk.CTkLabel(
             self.detail_header,
             text="Loot Details",
-            font=ctk.CTkFont(size=16, weight="bold")
+            font=ctk.CTkFont(size=16, weight="bold"),
+            cursor="hand2"
         )
         self.detail_name.pack(anchor="w")
+        self.detail_name.bind("<Button-1>", self._on_creature_name_click)
+        self.detail_name.bind("<Enter>", lambda e: self.detail_name.configure(font=ctk.CTkFont(size=16, weight="bold", underline=True)))
+        self.detail_name.bind("<Leave>", lambda e: self.detail_name.configure(font=ctk.CTkFont(size=16, weight="bold", underline=False)))
+
+        # Clickable zone link
+        self.zone_link = ctk.CTkLabel(
+            self.detail_header,
+            text="",
+            font=ctk.CTkFont(size=12),
+            text_color="#4CAF50",
+            cursor="hand2"
+        )
+        self.zone_link.bind("<Button-1>", self._on_zone_click)
+        self.zone_link.bind("<Enter>", lambda e: self.zone_link.configure(font=ctk.CTkFont(size=12, underline=True)))
+        self.zone_link.bind("<Leave>", lambda e: self.zone_link.configure(font=ctk.CTkFont(size=12, underline=False)))
 
         # Info row with zone and kills
         self.detail_info_frame = ctk.CTkFrame(self.detail_header, fg_color="transparent")
@@ -1601,13 +1617,15 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # Build zone display
         if stats["zones"]:
-            # Zone is known - show as text
-            zones_text = ", ".join(stats["zones"])
-            zone_display = f"Zone: {zones_text}  |  Kills: {stats['kills']}"
-            self.detail_info.configure(text=zone_display, text_color=("gray30", "gray70"))
+            # Zone is known - show clickable zone link and kills separately
+            zone_name = stats["zones"][0]  # Primary zone
+            self.zone_link.configure(text=f"Zone: {zone_name}")
+            self.zone_link.pack(anchor="w")
+            self.detail_info.configure(text=f"Kills: {stats['kills']}", text_color=("gray30", "gray70"))
             self.detail_info.pack(anchor="w")
             self.detail_info_frame.pack_forget()
         else:
+            self.zone_link.pack_forget()
             # Zone is unknown - show dropdown
             self.detail_info.pack_forget()
             self.detail_info_frame.pack(anchor="w", pady=(5, 0))
@@ -1716,6 +1734,29 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         wiki_name = self.selected_creature.replace(' ', '_')
         url = f"https://wiki.projectgorgon.com/wiki/{wiki_name}"
         webbrowser.open(url)
+
+    def _on_creature_name_click(self, event=None):
+        """Open wiki page for selected creature."""
+        if self.selected_creature:
+            wiki_name = self.selected_creature.replace(' ', '_')
+            webbrowser.open(f"https://wiki.projectgorgon.com/wiki/{wiki_name}")
+
+    def _on_zone_click(self, event=None):
+        """Open wiki page for current zone."""
+        if self.selected_creature:
+            stats = self.parser.get_creature_stats(self.selected_creature)
+            if stats and stats["zones"]:
+                zone_name = stats["zones"][0].replace(' ', '_')
+                webbrowser.open(f"https://wiki.projectgorgon.com/wiki/{zone_name}")
+
+    def _on_item_double_click(self, event, tree):
+        """Open wiki page for double-clicked item."""
+        item_id = tree.identify_row(event.y)
+        if item_id:
+            values = tree.item(item_id, 'values')
+            if values:
+                item_name = values[0].replace(' ', '_')
+                webbrowser.open(f"https://wiki.projectgorgon.com/wiki/{item_name}")
 
     def _on_wiki_text_changed(self, event=None):
         """Analyze pasted wiki content and show status."""
@@ -1926,6 +1967,52 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         tree.tag_configure("rate_red", foreground="#F44336")
         tree.tag_configure("wiki_only", foreground="#9E9E9E")  # Gray for wiki-only items
 
+        # Configure hover versions with underline
+        tree.tag_configure("rate_green_hover", foreground="#4CAF50", font=("TkDefaultFont", 10, "underline"))
+        tree.tag_configure("rate_light_green_hover", foreground="#8BC34A", font=("TkDefaultFont", 10, "underline"))
+        tree.tag_configure("rate_yellow_hover", foreground="#FFC107", font=("TkDefaultFont", 10, "underline"))
+        tree.tag_configure("rate_orange_hover", foreground="#FF9800", font=("TkDefaultFont", 10, "underline"))
+        tree.tag_configure("rate_red_hover", foreground="#F44336", font=("TkDefaultFont", 10, "underline"))
+        tree.tag_configure("wiki_only_hover", foreground="#9E9E9E", font=("TkDefaultFont", 10, "underline"))
+
+        # Track currently hovered item for underline effect
+        hovered_item = [None]  # Use list to allow mutation in nested function
+
+        def on_tree_motion(event):
+            item_id = tree.identify_row(event.y)
+            if item_id == hovered_item[0]:
+                return  # No change
+
+            # Remove underline from previously hovered item
+            if hovered_item[0]:
+                old_tags = tree.item(hovered_item[0], "tags")
+                if old_tags:
+                    old_tag = old_tags[0]
+                    if old_tag.endswith("_hover"):
+                        base_tag = old_tag[:-6]  # Remove "_hover" suffix
+                        tree.item(hovered_item[0], tags=(base_tag,))
+
+            # Add underline to new hovered item
+            if item_id:
+                tags = tree.item(item_id, "tags")
+                if tags:
+                    base_tag = tags[0]
+                    if not base_tag.endswith("_hover"):
+                        tree.item(item_id, tags=(base_tag + "_hover",))
+
+            hovered_item[0] = item_id
+
+        def on_tree_leave(event):
+            # Remove underline from hovered item when mouse leaves
+            if hovered_item[0]:
+                old_tags = tree.item(hovered_item[0], "tags")
+                if old_tags:
+                    old_tag = old_tags[0]
+                    if old_tag.endswith("_hover"):
+                        base_tag = old_tag[:-6]
+                        tree.item(hovered_item[0], tags=(base_tag,))
+            hovered_item[0] = None
+
         # Insert items
         for item_name, item_data in sorted_items:
             rate = item_data["drop_rate"]
@@ -1956,6 +2043,14 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # Pack treeview (no scrollbar - outer scrollframe handles scrolling)
         tree.pack(side="left", fill="both", expand=True)
+
+        # Double-click to open wiki page for item
+        tree.bind("<Double-1>", lambda e, t=tree: self._on_item_double_click(e, t))
+
+        # Hover underline effect bindings
+        tree.bind("<Motion>", on_tree_motion)
+        tree.bind("<Leave>", on_tree_leave)
+        tree.configure(cursor="hand2")
 
     def _get_rate_color(self, rate: float) -> str:
         """Get color based on drop rate."""
