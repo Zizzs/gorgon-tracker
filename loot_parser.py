@@ -273,6 +273,22 @@ class LootParser:
         except Exception as e:
             print(f"Warning: Could not mirror {source_path.name}: {e}")
 
+    def _mirror_player_log(self):
+        """Mirror only zone transition lines from Player.log."""
+        if not self.player_log_path.exists():
+            return
+
+        dest_path = self.mirror_dir / "Player.log"
+
+        try:
+            with open(self.player_log_path, 'r', encoding='utf-8', errors='replace') as f:
+                zone_lines = [line for line in f if self.PLAYER_LOG_ZONE_PATTERN.match(line.strip())]
+
+            with open(dest_path, 'w', encoding='utf-8') as f:
+                f.writelines(zone_lines)
+        except Exception as e:
+            print(f"Warning: Could not mirror Player.log: {e}")
+
     def _mirror_all_logs(self):
         """Mirror all Chat-*.log files and Player.log to PlayerLogs directory."""
         if not self.chatlog_dir.exists():
@@ -282,9 +298,8 @@ class LootParser:
         for log_file in self.chatlog_dir.glob("Chat-*.log"):
             self._mirror_log_file(log_file)
 
-        # Mirror Player.log
-        if self.player_log_path.exists():
-            self._mirror_log_file(self.player_log_path)
+        # Mirror Player.log (only zone transitions)
+        self._mirror_player_log()
 
     def _load_creature_data(self) -> dict:
         """
@@ -781,9 +796,8 @@ class LootParser:
         self._save_creature_data()
         self._generate_wiki_files()
 
-        # Mirror Player.log to keep it up to date
-        if self.player_log_path.exists():
-            self._mirror_log_file(self.player_log_path)
+        # Mirror Player.log (only zone transitions) to keep it up to date
+        self._mirror_player_log()
 
         return results
 
