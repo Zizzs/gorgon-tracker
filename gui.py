@@ -50,12 +50,16 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.creature_buttons = {}
         self.creature_zone_labels = {}
 
-        # Options state
+        # Options and Stats state
         self.showing_options = False
+        self.showing_stats = False
         self.auto_update_enabled = False
         self.auto_update_interval = 60  # seconds
         self.auto_update_job = None
         self.last_update_timestamp = None  # ISO format string or None
+
+        # Search state
+        self.search_var = ctk.StringVar()
 
         # Thread synchronization for shared data
         self._data_lock = threading.Lock()
@@ -314,16 +318,17 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.options_button.pack(side="right", padx=10, pady=7)
 
-        # Export button
-        self.export_button = ctk.CTkButton(
+        # Stats button
+        self.stats_button = ctk.CTkButton(
             button_frame,
-            text="Export",
-            command=self._export_database,
+            text="Stats",
+            command=self._toggle_stats,
             width=100,
             height=35,
             font=ctk.CTkFont(size=14)
         )
-        self.export_button.pack(side="right", padx=5, pady=7)
+        self.stats_button.pack(side="right", padx=5, pady=7)
+
 
     def _create_main_content(self):
         """Create the main content area with creature list and detail panel."""
@@ -355,6 +360,33 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             text="Creatures",
             font=ctk.CTkFont(size=16, weight="bold")
         ).pack(side="left")
+
+        # Search box
+        search_frame = ctk.CTkFrame(left_frame, fg_color="transparent")
+        search_frame.pack(fill="x", padx=10, pady=(5, 5))
+
+        self.search_entry = ctk.CTkEntry(
+            search_frame,
+            placeholder_text="Search creatures or items...",
+            textvariable=self.search_var,
+            width=220,
+            height=28,
+            font=ctk.CTkFont(size=12)
+        )
+        self.search_entry.pack(side="left", fill="x", expand=True)
+
+        self.search_clear_btn = ctk.CTkButton(
+            search_frame,
+            text="x",
+            width=28,
+            height=28,
+            font=ctk.CTkFont(size=12),
+            command=self._clear_search
+        )
+        self.search_clear_btn.pack(side="left", padx=(5, 0))
+
+        # Bind search variable to callback
+        self.search_var.trace_add("write", self._on_search_changed)
 
         # Column headers (zone is now shown as section headers)
         col_header = ctk.CTkFrame(left_frame, fg_color="transparent", height=25)
@@ -390,9 +422,10 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.right_frame.grid_columnconfigure(0, weight=1)
         self.right_frame.grid_rowconfigure(0, weight=1)
 
-        # Create BOTH panels upfront, stacked in same grid cell
+        # Create ALL panels upfront, stacked in same grid cell
         self._create_loot_detail_view()
         self._create_options_view()
+        self._create_stats_view()
 
         # Show detail panel on top initially
         self.detail_content.tkraise()
@@ -510,6 +543,116 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             wraplength=250
         )
         self.wiki_status.pack(side="left", padx=10, fill="x", expand=True)
+
+    def _create_stats_view(self):
+        """Create the stats panel view."""
+        self.stats_content = ctk.CTkFrame(self.right_frame)
+        self.stats_content.grid(row=0, column=0, sticky="nsew")
+
+        # Header (outside scrollable area)
+        header = ctk.CTkLabel(
+            self.stats_content,
+            text="Tracking Statistics",
+            font=ctk.CTkFont(size=16, weight="bold")
+        )
+        header.pack(anchor="w", padx=10, pady=10)
+
+        # Scrollable container for stats content
+        stats_scroll = ctk.CTkScrollableFrame(self.stats_content)
+        stats_scroll.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+
+        # Stats container frame
+        self.stats_frame = ctk.CTkFrame(stats_scroll, fg_color="transparent")
+        self.stats_frame.pack(fill="x", padx=10)
+
+        # Create stat labels (will be populated by _refresh_stats)
+        self.stat_labels = {}
+
+        stat_items = [
+            ("total_creatures", "Total Creatures Tracked"),
+            ("total_kills", "Total Kills"),
+            ("unique_items", "Unique Items Found"),
+            ("skinning_items", "Skinning Items Found"),
+            ("top_creature", "Most Killed Creature"),
+            ("rarest_drop", "Rarest Drop")
+        ]
+
+        for key, label_text in stat_items:
+            row = ctk.CTkFrame(self.stats_frame, fg_color="transparent")
+            row.pack(fill="x", pady=3)
+
+            ctk.CTkLabel(
+                row,
+                text=f"{label_text}:",
+                font=ctk.CTkFont(size=12),
+                width=180,
+                anchor="w"
+            ).pack(side="left")
+
+            value_label = ctk.CTkLabel(
+                row,
+                text="-",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                anchor="w",
+                wraplength=250 if key == "rarest_drop" else 0
+            )
+            value_label.pack(side="left", fill="x", expand=True)
+            self.stat_labels[key] = value_label
+
+        # Refresh button
+        refresh_frame = ctk.CTkFrame(stats_scroll, fg_color="transparent")
+        refresh_frame.pack(fill="x", padx=10, pady=(20, 10))
+
+        ctk.CTkButton(
+            refresh_frame,
+            text="Refresh Stats",
+            command=self._refresh_stats,
+            width=120,
+            height=32
+        ).pack(side="left")
+
+        # Initial refresh
+        self._refresh_stats()
+
+    def _refresh_stats(self):
+        """Refresh the stats dashboard with current data."""
+        if self.parser is None or not hasattr(self, 'stat_labels'):
+            return
+
+        with self._data_lock:
+            stats = self.parser.get_aggregate_stats()
+
+        # Update labels
+        self.stat_labels["total_creatures"].configure(
+            text=f"{stats['total_creatures']:,}"
+        )
+        self.stat_labels["total_kills"].configure(
+            text=f"{stats['total_kills']:,}"
+        )
+        self.stat_labels["unique_items"].configure(
+            text=f"{stats['unique_items']:,}"
+        )
+        self.stat_labels["skinning_items"].configure(
+            text=f"{stats['skinning_items']:,}"
+        )
+
+        # Top creature
+        if stats['top_creature']:
+            name, kills = stats['top_creature']
+            self.stat_labels["top_creature"].configure(
+                text=f"{name} ({kills:,} kills)"
+            )
+        else:
+            self.stat_labels["top_creature"].configure(text="-")
+
+        # Rarest drop
+        if stats['rarest_drop']:
+            item, creature, rate = stats['rarest_drop']
+            self.stat_labels["rarest_drop"].configure(
+                text=f"{item} ({rate:.1f}%) from {creature}"
+            )
+        else:
+            self.stat_labels["rarest_drop"].configure(text="-")
 
     def _create_options_view(self):
         """Create the options view."""
@@ -688,6 +831,36 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.import_status.pack(anchor="w", padx=15, pady=(0, 10))
 
+        # Export Database section
+        export_frame = ctk.CTkFrame(self.options_scroll)
+        export_frame.pack(fill="x", padx=10, pady=10)
+
+        ctk.CTkLabel(
+            export_frame,
+            text="Export Database",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", padx=15, pady=(15, 5))
+
+        ctk.CTkLabel(
+            export_frame,
+            text="Save your creature data to a shareable file",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", padx=15, pady=(0, 10))
+
+        export_btn_frame = ctk.CTkFrame(export_frame, fg_color="transparent")
+        export_btn_frame.pack(fill="x", padx=15, pady=(0, 15))
+
+        self.export_button = ctk.CTkButton(
+            export_btn_frame,
+            text="Export Database",
+            command=self._export_database,
+            width=130,
+            height=32,
+            font=ctk.CTkFont(size=13)
+        )
+        self.export_button.pack(side="left")
+
         # Data Management section
         data_frame = ctk.CTkFrame(self.options_scroll)
         data_frame.pack(fill="x", padx=10, pady=10)
@@ -757,17 +930,37 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         else:
             self._show_options_panel()
 
+    def _toggle_stats(self):
+        """Toggle between stats panel and detail panel."""
+        if self.showing_stats:
+            self._show_detail_panel()
+        else:
+            self._show_stats_panel()
+
     def _show_detail_panel(self):
         """Show the loot detail panel."""
         self.detail_content.tkraise()
         self.options_button.configure(text="Options")
+        self.stats_button.configure(text="Stats")
         self.showing_options = False
+        self.showing_stats = False
 
     def _show_options_panel(self):
         """Show the options panel."""
         self.options_content.tkraise()
         self.options_button.configure(text="Back")
+        self.stats_button.configure(text="Stats")
         self.showing_options = True
+        self.showing_stats = False
+
+    def _show_stats_panel(self):
+        """Show the stats panel."""
+        self._refresh_stats()
+        self.stats_content.tkraise()
+        self.stats_button.configure(text="Back")
+        self.options_button.configure(text="Options")
+        self.showing_stats = True
+        self.showing_options = False
 
     def _save_options(self):
         """Save options and apply changes."""
@@ -830,6 +1023,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
                 # Refresh UI
                 self._refresh_creature_list()
+                self._refresh_stats()
 
                 # Clear detail view
                 self.detail_name.configure(text="Loot Details")
@@ -1007,6 +1201,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
             # Refresh UI
             self._refresh_creature_list()
+            self._refresh_stats()
 
             msg = f"Imported: {new_creatures} new, {updated_creatures} updated"
             self.import_status.configure(text=msg, text_color="#4CAF50")
@@ -1162,6 +1357,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     self._update_auto_status()
                     self._update_zone_label()
                     self._refresh_creature_list()
+                    self._refresh_stats()
 
                 self.after(0, finish)
 
@@ -1215,6 +1411,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     self._update_auto_status()
                     self._update_zone_label()
                     self._refresh_creature_list()
+                    self._refresh_stats()
 
                 self.after(0, finish)
 
@@ -1246,6 +1443,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     creatures_by_zone[zone] = []
                 # Copy the data we need to avoid holding lock too long
                 creatures_by_zone[zone].append((creature, {"kills": data.get("kills", 0)}))
+
+        # Apply search filter
+        creatures_by_zone = self._filter_creatures(creatures_by_zone)
 
         # Sort zones alphabetically, sort creatures within each zone by kills
         for zone in sorted(creatures_by_zone.keys()):
@@ -1319,13 +1519,62 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.zone_expanded[zone] = not self.zone_expanded.get(zone, True)
         self._refresh_creature_list()
 
+    def _clear_search(self):
+        """Clear the search box."""
+        self.search_var.set("")
+
+    def _on_search_changed(self, *args):
+        """Handle search text changes."""
+        self._refresh_creature_list()
+
+    def _filter_creatures(self, creatures_by_zone: dict) -> dict:
+        """
+        Filter creatures by search term.
+        Matches creature names and item names (case-insensitive).
+
+        Args:
+            creatures_by_zone: Dict of zone -> list of (creature_name, data) tuples
+
+        Returns:
+            Filtered dict with same structure
+        """
+        search_term = self.search_var.get().strip().lower()
+        if not search_term:
+            return creatures_by_zone
+
+        filtered = {}
+        with self._data_lock:
+            for zone, creatures in creatures_by_zone.items():
+                matching = []
+                for creature_name, data in creatures:
+                    # Check creature name
+                    if search_term in creature_name.lower():
+                        matching.append((creature_name, data))
+                        continue
+
+                    # Check item names for this creature
+                    creature_data = self.parser.creature_data.get(creature_name, {})
+                    items = creature_data.get("items", {})
+                    skinning = creature_data.get("skinning", {})
+
+                    item_match = any(search_term in item.lower() for item in items.keys())
+                    skinning_match = any(search_term in item.lower() for item in skinning.keys())
+
+                    if item_match or skinning_match:
+                        matching.append((creature_name, data))
+
+                if matching:
+                    filtered[zone] = matching
+
+        return filtered
+
     def _select_creature(self, creature_name: str):
         """Select a creature and display its loot details."""
         if self.parser is None:
             return
 
-        # Switch to detail view if showing options
-        if self.showing_options:
+        # Switch to detail view if showing options or stats
+        if self.showing_options or self.showing_stats:
             self._show_detail_panel()
 
         # Update button highlights
@@ -1571,6 +1820,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # Refresh the info tab to show new items
         self._refresh_loot_display()
+        self._refresh_stats()
 
         # Show status - count items we added to the wiki
         creature_data = self.parser.creature_data.get(self.selected_creature, {})
