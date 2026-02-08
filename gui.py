@@ -10,6 +10,7 @@ import os
 import sys
 import json
 import threading
+import webbrowser
 from pathlib import Path
 from datetime import datetime
 from tkinter import ttk
@@ -18,12 +19,13 @@ import customtkinter as ctk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 from loot_parser import LootParser, ZONE_NAMES
+from paths import get_gorgon_tracker_data_dir, get_pg_chatlog_dir
 
 # List of valid zone display names for dropdown
 VALID_ZONES = sorted([name for name in ZONE_NAMES.values() if name is not None])
 
-# Settings file path
-SETTINGS_FILE = Path("gui_settings.json")
+# Settings file path - now stored in LocalLow/GorgonTracker
+SETTINGS_FILE = get_gorgon_tracker_data_dir() / "gui_settings.json"
 
 
 class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
@@ -35,7 +37,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # Window configuration
         self.title("Gorgon Tracker")
-        self.geometry("900x650")
+        self.geometry("1050x650")
         self.minsize(700, 500)
 
         # Set appearance
@@ -74,7 +76,10 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._update_auto_status()
 
     def _load_settings(self):
-        """Load GUI settings from file."""
+        """Load GUI settings from file, migrating from legacy location if needed."""
+        # Migrate legacy settings if needed
+        self._migrate_legacy_settings()
+
         if SETTINGS_FILE.exists():
             try:
                 with open(SETTINGS_FILE, 'r') as f:
@@ -84,6 +89,26 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     self.last_update_timestamp = settings.get("last_update_timestamp", None)
             except (json.JSONDecodeError, IOError):
                 pass
+
+    def _migrate_legacy_settings(self):
+        """Migrate settings from legacy location (project root) if needed."""
+        import shutil
+
+        # Get the project root
+        if getattr(sys, 'frozen', False):
+            project_root = Path(sys.executable).parent
+        else:
+            project_root = Path(__file__).parent
+
+        legacy_settings = project_root / "gui_settings.json"
+
+        # Only migrate if legacy exists and new doesn't
+        if legacy_settings.exists() and not SETTINGS_FILE.exists():
+            try:
+                shutil.copy2(legacy_settings, SETTINGS_FILE)
+                print(f"Migrated gui_settings.json to {SETTINGS_FILE}")
+            except Exception as e:
+                print(f"Warning: Could not migrate gui_settings.json: {e}")
 
     def _save_settings(self):
         """Save GUI settings to file."""
@@ -99,23 +124,30 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             pass
 
     def _load_config(self):
-        """Load configuration from .env file."""
+        """Load configuration from .env file or auto-detect paths."""
         load_dotenv()
 
+        # Try .env first, then auto-detect
         chatlog_dir = os.getenv("USER_CHATLOG_FILE_LOCATION")
+
+        if not chatlog_dir:
+            # Try auto-detection
+            detected_dir = get_pg_chatlog_dir()
+            if detected_dir:
+                chatlog_dir = str(detected_dir)
 
         if not chatlog_dir:
             self._show_config_error()
             return
 
+        # Storage directory is automatically set to LocalLow/GorgonTracker
         self.parser = LootParser(
             chatlog_dir=chatlog_dir,
-            output_dir="CreaturePages",
-            state_file="processed_logs.json"
+            output_dir="CreaturePages"
         )
 
     def _show_config_error(self):
-        """Show error when .env is not configured."""
+        """Show error when ChatLogs directory cannot be found."""
         error_frame = ctk.CTkFrame(self)
         error_frame.pack(fill="both", expand=True, padx=20, pady=20)
 
@@ -127,9 +159,12 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         ctk.CTkLabel(
             error_frame,
-            text="USER_CHATLOG_FILE_LOCATION not set in .env file.\n\n"
-                 "Create a .env file with:\n"
-                 "USER_CHATLOG_FILE_LOCATION=C:\\path\\to\\ChatLogs",
+            text="Could not find Project Gorgon ChatLogs folder.\n\n"
+                 "Auto-detection failed. You can manually set the path\n"
+                 "by creating a .env file with:\n"
+                 "USER_CHATLOG_FILE_LOCATION=C:\\path\\to\\ChatLogs\n\n"
+                 "Typical location:\n"
+                 "C:\\Users\\YourName\\AppData\\LocalLow\\Elder Game\\Project Gorgon\\ChatLogs",
             font=ctk.CTkFont(size=14),
             justify="left"
         ).pack(pady=10)
@@ -318,7 +353,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             font=ctk.CTkFont(size=16, weight="bold")
         ).pack(side="left")
 
-        # Column headers
+        # Column headers (zone is now shown as section headers)
         col_header = ctk.CTkFrame(left_frame, fg_color="transparent", height=25)
         col_header.pack(fill="x", padx=10)
         col_header.pack_propagate(False)
@@ -327,7 +362,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             col_header,
             text="Name",
             font=ctk.CTkFont(size=11),
-            width=180,
+            width=220,
             anchor="w"
         ).pack(side="left")
 
@@ -337,14 +372,6 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             font=ctk.CTkFont(size=11),
             width=50,
             anchor="center"
-        ).pack(side="left")
-
-        ctk.CTkLabel(
-            col_header,
-            text="Zone",
-            font=ctk.CTkFont(size=11),
-            width=100,
-            anchor="w"
         ).pack(side="left")
 
         # Scrollable creature list
@@ -460,6 +487,16 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.wiki_sync_button.pack(side="left")
 
+        self.wiki_open_button = ctk.CTkButton(
+            wiki_button_frame,
+            text="Open Wiki",
+            command=self._open_wiki_page,
+            width=100,
+            height=32,
+            font=ctk.CTkFont(size=13, weight="bold")
+        )
+        self.wiki_open_button.pack(side="left", padx=(10, 0))
+
         self.wiki_status = ctk.CTkLabel(
             wiki_button_frame,
             text="",
@@ -526,6 +563,33 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             height=28
         )
         browse_button.pack(side="right")
+
+        # Storage location section (read-only info)
+        storage_frame = ctk.CTkFrame(self.options_scroll)
+        storage_frame.pack(fill="x", padx=10, pady=10)
+
+        ctk.CTkLabel(
+            storage_frame,
+            text="Data Storage Location",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", padx=15, pady=(15, 5))
+
+        ctk.CTkLabel(
+            storage_frame,
+            text="Gorgon Tracker stores creature data and settings here:",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", padx=15, pady=(0, 5))
+
+        storage_path = str(get_gorgon_tracker_data_dir())
+        self.storage_path_label = ctk.CTkLabel(
+            storage_frame,
+            text=storage_path,
+            font=ctk.CTkFont(family="Consolas", size=11),
+            text_color=("gray30", "gray70"),
+            wraplength=400
+        )
+        self.storage_path_label.pack(anchor="w", padx=15, pady=(0, 15))
 
         # Auto-update section
         auto_frame = ctk.CTkFrame(self.options_scroll)
@@ -803,11 +867,10 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             with open(env_path, 'w', encoding='utf-8') as f:
                 f.write(env_content)
 
-            # Reinitialize parser with new folder
+            # Reinitialize parser with new folder (storage_dir automatically set)
             self.parser = LootParser(
                 chatlog_dir=new_folder,
-                output_dir="CreaturePages",
-                state_file="processed_logs.json"
+                output_dir="CreaturePages"
             )
 
             self._refresh_creature_list()
@@ -1147,67 +1210,100 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         thread.start()
 
     def _refresh_creature_list(self):
-        """Refresh the creature list from parser data."""
+        """Refresh the creature list from parser data with collapsible zone sections."""
         if self.parser is None:
             return
 
-        # Clear existing buttons
+        # Clear existing widgets
         for widget in self.creature_scroll.winfo_children():
             widget.destroy()
         self.creature_buttons.clear()
         self.creature_zone_labels.clear()
 
-        # Sort creatures by kill count (descending)
-        creatures = sorted(
-            self.parser.creature_data.items(),
-            key=lambda x: x[1].get("kills", 0),
-            reverse=True
-        )
+        # Initialize zone_expanded if not exists
+        if not hasattr(self, 'zone_expanded'):
+            self.zone_expanded = {}
 
-        for creature_name, data in creatures:
-            kills = data.get("kills", 0)
-            zones = data.get("zones", [])
-            zone_text = zones[0] if zones else "-"
-            if len(zones) > 1:
-                zone_text += f" +{len(zones)-1}"
+        # Group creatures by zone
+        creatures_by_zone = {}
+        for creature, data in self.parser.creature_data.items():
+            zones = data.get("zones", ["Unknown"])
+            zone = zones[0] if zones else "Unknown"
+            if zone not in creatures_by_zone:
+                creatures_by_zone[zone] = []
+            creatures_by_zone[zone].append((creature, data))
 
-            row = ctk.CTkFrame(self.creature_scroll, fg_color="transparent", height=30)
-            row.pack(fill="x", pady=1)
-            row.pack_propagate(False)
+        # Sort zones alphabetically, sort creatures within each zone by kills
+        for zone in sorted(creatures_by_zone.keys()):
+            creatures = sorted(
+                creatures_by_zone[zone],
+                key=lambda x: x[1].get("kills", 0),
+                reverse=True
+            )
 
-            # Clickable button for creature name
-            name_btn = ctk.CTkButton(
-                row,
-                text=creature_name[:20] + "..." if len(creature_name) > 20 else creature_name,
-                width=180,
-                height=26,
+            # Default to expanded
+            if zone not in self.zone_expanded:
+                self.zone_expanded[zone] = True
+
+            # Create zone header
+            header_frame = ctk.CTkFrame(self.creature_scroll, fg_color="transparent", height=28)
+            header_frame.pack(fill="x", pady=(4, 1))
+            header_frame.pack_propagate(False)
+
+            arrow = "▼" if self.zone_expanded[zone] else "▶"
+            header_btn = ctk.CTkButton(
+                header_frame,
+                text=f"{arrow} {zone} ({len(creatures)})",
+                width=280,
+                height=24,
                 anchor="w",
-                fg_color="transparent",
+                fg_color=("gray85", "gray25"),
                 text_color=("gray10", "gray90"),
-                hover_color=("gray80", "gray30"),
-                command=lambda c=creature_name: self._select_creature(c)
+                hover_color=("gray75", "gray35"),
+                font=ctk.CTkFont(size=12, weight="bold"),
+                command=lambda z=zone: self._toggle_zone(z)
             )
-            name_btn.pack(side="left", padx=(0, 5))
-            self.creature_buttons[creature_name] = name_btn
+            header_btn.pack(side="left")
 
-            ctk.CTkLabel(
-                row,
-                text=str(kills),
-                width=50,
-                anchor="center",
-                font=ctk.CTkFont(size=12)
-            ).pack(side="left")
+            # Create creature rows (only if expanded)
+            if self.zone_expanded[zone]:
+                for creature_name, data in creatures:
+                    kills = data.get("kills", 0)
 
-            zone_label = ctk.CTkLabel(
-                row,
-                text=zone_text[:12],
-                width=100,
-                anchor="w",
-                font=ctk.CTkFont(size=11),
-                text_color="gray"
-            )
-            zone_label.pack(side="left")
-            self.creature_zone_labels[creature_name] = zone_label
+                    row = ctk.CTkFrame(self.creature_scroll, fg_color="transparent", height=30)
+                    row.pack(fill="x", pady=1)
+                    row.pack_propagate(False)
+
+                    # Indent for creatures under zone header
+                    ctk.CTkLabel(row, text="", width=15).pack(side="left")
+
+                    # Clickable button for creature name
+                    name_btn = ctk.CTkButton(
+                        row,
+                        text=creature_name[:22] + "..." if len(creature_name) > 22 else creature_name,
+                        width=205,
+                        height=26,
+                        anchor="w",
+                        fg_color="transparent",
+                        text_color=("gray10", "gray90"),
+                        hover_color=("gray80", "gray30"),
+                        command=lambda c=creature_name: self._select_creature(c)
+                    )
+                    name_btn.pack(side="left", padx=(0, 5))
+                    self.creature_buttons[creature_name] = name_btn
+
+                    ctk.CTkLabel(
+                        row,
+                        text=str(kills),
+                        width=50,
+                        anchor="center",
+                        font=ctk.CTkFont(size=12)
+                    ).pack(side="left")
+
+    def _toggle_zone(self, zone: str):
+        """Toggle zone section expanded/collapsed state."""
+        self.zone_expanded[zone] = not self.zone_expanded.get(zone, True)
+        self._refresh_creature_list()
 
     def _select_creature(self, creature_name: str):
         """Select a creature and display its loot details."""
@@ -1346,6 +1442,15 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.wiki_textbox.delete("1.0", "end")
         self.wiki_textbox.insert("1.0", header + wiki_text)
         # Keep editable for paste/copy
+
+    def _open_wiki_page(self):
+        """Open the wiki page for the selected creature."""
+        if not self.selected_creature:
+            return
+
+        wiki_name = self.selected_creature.replace(' ', '_')
+        url = f"https://wiki.projectgorgon.com/wiki/{wiki_name}"
+        webbrowser.open(url)
 
     def _sync_wiki(self):
         """Sync pasted wiki content with our database."""
