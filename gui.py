@@ -504,6 +504,10 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.skinning_section = ctk.CTkFrame(self.detail_scroll, fg_color="transparent")
         self.skinning_section.pack(fill="x")
 
+        # Butchering section container (will be populated dynamically)
+        self.butchering_section = ctk.CTkFrame(self.detail_scroll, fg_color="transparent")
+        self.butchering_section.pack(fill="x")
+
         # Wiki tab
         self.wiki_tab = self.detail_tabs.add("Wiki")
 
@@ -589,6 +593,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             ("total_kills", "Total Kills"),
             ("unique_items", "Unique Items Found"),
             ("skinning_items", "Skinning Items Found"),
+            ("butchering_items", "Butchering Items Found"),
             ("top_creature", "Most Killed Creature"),
             ("rarest_drop", "Rarest Drop")
         ]
@@ -650,6 +655,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.stat_labels["skinning_items"].configure(
             text=f"{stats['skinning_items']:,}"
+        )
+        self.stat_labels["butchering_items"].configure(
+            text=f"{stats['butchering_items']:,}"
         )
 
         # Top creature
@@ -1047,6 +1055,8 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 for widget in self.loot_section.winfo_children():
                     widget.destroy()
                 for widget in self.skinning_section.winfo_children():
+                    widget.destroy()
+                for widget in self.butchering_section.winfo_children():
                     widget.destroy()
                 self.wiki_textbox.configure(state="normal")
                 self.wiki_textbox.delete("1.0", "end")
@@ -1572,11 +1582,13 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     creature_data = self.parser.creature_data.get(creature_name, {})
                     items = creature_data.get("items", {})
                     skinning = creature_data.get("skinning", {})
+                    butchering = creature_data.get("butchering", {})
 
                     item_match = any(search_term in item.lower() for item in items.keys())
                     skinning_match = any(search_term in item.lower() for item in skinning.keys())
+                    butchering_match = any(search_term in item.lower() for item in butchering.keys())
 
-                    if item_match or skinning_match:
+                    if item_match or skinning_match or butchering_match:
                         matching.append((creature_name, data))
 
                 if matching:
@@ -1654,6 +1666,8 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             widget.destroy()
         for widget in self.skinning_section.winfo_children():
             widget.destroy()
+        for widget in self.butchering_section.winfo_children():
+            widget.destroy()
 
         # Populate loot section
         self._populate_item_section(
@@ -1667,6 +1681,13 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self.skinning_section,
             "Skinning",
             stats.get("skinning", {})
+        )
+
+        # Populate butchering section
+        self._populate_item_section(
+            self.butchering_section,
+            "Butchering",
+            stats.get("butchering", {})
         )
 
         # Clear wiki tab for user input
@@ -1905,6 +1926,8 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             widget.destroy()
         for widget in self.skinning_section.winfo_children():
             widget.destroy()
+        for widget in self.butchering_section.winfo_children():
+            widget.destroy()
 
         self._populate_item_section(
             self.loot_section,
@@ -1916,6 +1939,12 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self.skinning_section,
             "Skinning",
             stats.get("skinning", {})
+        )
+
+        self._populate_item_section(
+            self.butchering_section,
+            "Butchering",
+            stats.get("butchering", {})
         )
 
     def _populate_item_section(self, parent, title: str, items: dict):

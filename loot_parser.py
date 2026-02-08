@@ -473,7 +473,7 @@ class LootParser:
     def _record_kill(self, creature: str, zone: Optional[str] = None):
         """Record a creature kill."""
         if creature not in self.creature_data:
-            self.creature_data[creature] = {"kills": 0, "zones": [], "items": {}}
+            self.creature_data[creature] = {"kills": 0, "zones": [], "items": {}, "skinning": {}, "butchering": {}}
 
         # Ensure zones list exists (for backwards compatibility)
         if "zones" not in self.creature_data[creature]:
@@ -502,7 +502,7 @@ class LootParser:
             zone: Optional zone where the item dropped
         """
         if creature not in self.creature_data:
-            self.creature_data[creature] = {"kills": 0, "zones": [], "items": {}, "skinning": {}}
+            self.creature_data[creature] = {"kills": 0, "zones": [], "items": {}, "skinning": {}, "butchering": {}}
 
         # Ensure skinning dict exists (backwards compatibility)
         if "skinning" not in self.creature_data[creature]:
@@ -541,7 +541,7 @@ class LootParser:
         Record a skinning drop. Returns True if this is a new skinning item for this creature.
         """
         if creature not in self.creature_data:
-            self.creature_data[creature] = {"kills": 0, "zones": [], "items": {}, "skinning": {}}
+            self.creature_data[creature] = {"kills": 0, "zones": [], "items": {}, "skinning": {}, "butchering": {}}
 
         # Ensure skinning dict exists (backwards compatibility)
         if "skinning" not in self.creature_data[creature]:
@@ -560,6 +560,33 @@ class LootParser:
         else:
             skinning[base_name]["count"] += count
             skinning[base_name]["last_seen"] = today
+
+        return is_new
+
+    def _record_butchering(self, creature: str, base_name: str, count: int = 1) -> bool:
+        """
+        Record a butchering drop. Returns True if this is a new butchering item for this creature.
+        """
+        if creature not in self.creature_data:
+            self.creature_data[creature] = {"kills": 0, "zones": [], "items": {}, "skinning": {}, "butchering": {}}
+
+        # Ensure butchering dict exists (backwards compatibility)
+        if "butchering" not in self.creature_data[creature]:
+            self.creature_data[creature]["butchering"] = {}
+
+        butchering = self.creature_data[creature]["butchering"]
+        today = datetime.now().strftime("%Y-%m-%d")
+        is_new = base_name not in butchering
+
+        if is_new:
+            butchering[base_name] = {
+                "count": count,
+                "first_seen": today,
+                "last_seen": today
+            }
+        else:
+            butchering[base_name]["count"] += count
+            butchering[base_name]["last_seen"] = today
 
         return is_new
 
@@ -609,28 +636,37 @@ class LootParser:
                 return {"type": "kill", "creature": self.current_creature, "zone": self.current_zone}
 
         elif channel == "Status":
-            # Check for skinning/butchering XP - retrospectively classify last loot as skinning
-            if self.SKINNING_XP_PATTERN.match(message) or self.BUTCHERING_XP_PATTERN.match(message):
-                # If there was loot within 2 seconds, reclassify it as skinning
+            # Check for skinning XP - retrospectively classify last loot as skinning
+            is_skinning = self.SKINNING_XP_PATTERN.match(message)
+            is_butchering = self.BUTCHERING_XP_PATTERN.match(message)
+
+            if is_skinning or is_butchering:
+                # If there was loot on the SAME SECOND, reclassify it as skinning/butchering.
+                # Actual skinning/butchering items appear on the same timestamp as the XP.
+                # Regular loot (like Pixie Sugar) appears 1+ seconds before any XP.
                 if self.last_loot and timestamp:
                     time_diff = (timestamp - self.last_loot["timestamp"]).total_seconds()
-                    if 0 <= time_diff <= 2:
+                    if 0 <= time_diff < 1:
                         creature = self.last_loot["creature"]
                         base_name = self.last_loot["base_name"]
                         count = self.last_loot["count"]
 
-                        # Move from regular loot to skinning
+                        # Move from regular loot to skinning or butchering
                         if creature in self.creature_data:
                             items = self.creature_data[creature].get("items", {})
                             if base_name in items:
                                 # Remove from regular loot
                                 del items[base_name]
-                            # Add to skinning
-                            self._record_skinning(creature, base_name, count)
+                            # Add to appropriate category
+                            if is_skinning:
+                                self._record_skinning(creature, base_name, count)
+                            else:
+                                self._record_butchering(creature, base_name, count)
                             self._save_creature_data()
 
                 self.last_loot = None
-                return {"type": "skinning_xp", "creature": self.current_creature}
+                xp_type = "skinning_xp" if is_skinning else "butchering_xp"
+                return {"type": xp_type, "creature": self.current_creature}
 
             # Check for loot
             loot_match = self.LOOT_PATTERN.match(message)
@@ -884,7 +920,7 @@ class LootParser:
             return {}
 
         log_files = sorted(self.chatlog_dir.glob("Chat-*.log"))
-        stats = {"new_creatures": 0, "new_items": 0, "new_skinning": 0, "skipped_old": 0}
+        stats = {"new_creatures": 0, "new_items": 0, "new_skinning": 0, "new_butchering": 0, "skipped_old": 0}
 
         for log_file in log_files:
             if callback:
@@ -982,7 +1018,7 @@ class LootParser:
                             # Create creature entry if new
                             if current_creature not in self.creature_data:
                                 self.creature_data[current_creature] = {
-                                    "kills": 0, "zones": [], "items": {}, "skinning": {}
+                                    "kills": 0, "zones": [], "items": {}, "skinning": {}, "butchering": {}
                                 }
                                 stats["new_creatures"] += 1
                                 if callback:
@@ -1003,11 +1039,16 @@ class LootParser:
                                     self.creature_data[current_creature]["zones"] = zones
 
                     elif channel == "Status":
-                        # Skinning/butchering XP - retrospectively classify last loot as skinning
-                        if self.SKINNING_XP_PATTERN.match(message) or self.BUTCHERING_XP_PATTERN.match(message):
+                        # Skinning/butchering XP - retrospectively classify last loot
+                        is_skinning = self.SKINNING_XP_PATTERN.match(message)
+                        is_butchering = self.BUTCHERING_XP_PATTERN.match(message)
+
+                        if is_skinning or is_butchering:
+                            # Only reclassify if loot was on the SAME SECOND as XP.
+                            # Regular loot appears 1+ seconds before any skinning/butchering XP.
                             if last_loot and current_timestamp:
                                 time_diff = (current_timestamp - last_loot["timestamp"]).total_seconds()
-                                if 0 <= time_diff <= 2:
+                                if 0 <= time_diff < 1:
                                     loot_creature = last_loot["creature"]
                                     loot_base_name = last_loot["base_name"]
                                     loot_count = last_loot["count"]
@@ -1020,16 +1061,22 @@ class LootParser:
                                             del items[loot_base_name]
                                             stats["new_items"] -= 1  # Adjust count
 
-                                        # Add to skinning
-                                        skinning = self.creature_data[loot_creature].setdefault("skinning", {})
-                                        if loot_base_name not in skinning:
-                                            skinning[loot_base_name] = {
+                                        # Add to skinning or butchering
+                                        if is_skinning:
+                                            category = self.creature_data[loot_creature].setdefault("skinning", {})
+                                            stat_key = "new_skinning"
+                                        else:
+                                            category = self.creature_data[loot_creature].setdefault("butchering", {})
+                                            stat_key = "new_butchering"
+
+                                        if loot_base_name not in category:
+                                            category[loot_base_name] = {
                                                 "count": loot_count, "first_seen": today, "last_seen": today
                                             }
-                                            stats["new_skinning"] += 1
+                                            stats[stat_key] = stats.get(stat_key, 0) + 1
                                         else:
-                                            skinning[loot_base_name]["count"] += loot_count
-                                            skinning[loot_base_name]["last_seen"] = today
+                                            category[loot_base_name]["count"] += loot_count
+                                            category[loot_base_name]["last_seen"] = today
 
                             last_loot = None
                             continue
@@ -1087,7 +1134,7 @@ class LootParser:
         self._mirror_all_logs()
 
         if callback:
-            callback(f"Rescan complete: {stats['new_creatures']} new creatures, {stats['new_items']} new items, {stats['new_skinning']} new skinning")
+            callback(f"Rescan complete: {stats['new_creatures']} new creatures, {stats['new_items']} new items, {stats['new_skinning']} skinning, {stats.get('new_butchering', 0)} butchering")
             if stats["skipped_old"] > 0:
                 callback(f"  (Skipped {stats['skipped_old']} already-processed entries)")
 
@@ -1180,13 +1227,15 @@ class LootParser:
         kills = data.get("kills", 0)
         items = data.get("items", {})
         skinning = data.get("skinning", {})
+        butchering = data.get("butchering", {})
         zones = data.get("zones", [])
 
         stats = {
             "kills": kills,
             "zones": zones,
             "items": {},
-            "skinning": {}
+            "skinning": {},
+            "butchering": {}
         }
 
         for item_name, item_data in items.items():
@@ -1214,6 +1263,100 @@ class LootParser:
                 "first_seen": item_data.get("first_seen"),
                 "last_seen": item_data.get("last_seen")
             }
+
+        for item_name, item_data in butchering.items():
+            count = item_data.get("count", 0)
+            drop_rate = (count / kills * 100) if kills > 0 else 0
+
+            stats["butchering"][item_name] = {
+                "count": count,
+                "drop_rate": round(drop_rate, 2),
+                "first_seen": item_data.get("first_seen"),
+                "last_seen": item_data.get("last_seen")
+            }
+
+        return stats
+
+    def get_aggregate_stats(self) -> dict:
+        """
+        Get aggregate statistics across all creatures.
+
+        Returns:
+            Dict with:
+                - total_creatures: Number of creatures tracked
+                - total_kills: Sum of all kills
+                - unique_items: Count of unique loot items
+                - skinning_items: Count of unique skinning items
+                - butchering_items: Count of unique butchering items
+                - top_creature: Tuple of (name, kills) for most killed creature
+                - rarest_drop: Tuple of (item, creature, rate) for lowest drop rate
+        """
+        stats = {
+            "total_creatures": 0,
+            "total_kills": 0,
+            "unique_items": 0,
+            "skinning_items": 0,
+            "butchering_items": 0,
+            "top_creature": None,
+            "rarest_drop": None
+        }
+
+        if not self.creature_data:
+            return stats
+
+        stats["total_creatures"] = len(self.creature_data)
+
+        all_items = set()
+        all_skinning = set()
+        all_butchering = set()
+        top_kills = 0
+        top_creature_name = None
+        rarest_rate = float('inf')
+        rarest_item = None
+        rarest_creature = None
+
+        for creature_name, data in self.creature_data.items():
+            kills = data.get("kills", 0)
+            stats["total_kills"] += kills
+
+            # Track top creature
+            if kills > top_kills:
+                top_kills = kills
+                top_creature_name = creature_name
+
+            # Count unique items
+            items = data.get("items", {})
+            for item_name, item_data in items.items():
+                all_items.add(item_name)
+
+                # Find rarest drop (exclude wiki_only items, require count > 0)
+                if not item_data.get("wiki_only", False) and item_data.get("count", 0) > 0:
+                    if kills > 0:
+                        drop_rate = (item_data.get("count", 0) / kills) * 100
+                        if drop_rate < rarest_rate:
+                            rarest_rate = drop_rate
+                            rarest_item = item_name
+                            rarest_creature = creature_name
+
+            # Count skinning items
+            skinning = data.get("skinning", {})
+            for item_name in skinning.keys():
+                all_skinning.add(item_name)
+
+            # Count butchering items
+            butchering = data.get("butchering", {})
+            for item_name in butchering.keys():
+                all_butchering.add(item_name)
+
+        stats["unique_items"] = len(all_items)
+        stats["skinning_items"] = len(all_skinning)
+        stats["butchering_items"] = len(all_butchering)
+
+        if top_creature_name:
+            stats["top_creature"] = (top_creature_name, top_kills)
+
+        if rarest_item and rarest_rate < float('inf'):
+            stats["rarest_drop"] = (rarest_item, rarest_creature, rarest_rate)
 
         return stats
 
@@ -1296,7 +1439,7 @@ class LootParser:
             Dict with merge statistics: {"added": int, "existing": int}
         """
         if creature not in self.creature_data:
-            self.creature_data[creature] = {"kills": 0, "zones": [], "items": {}, "skinning": {}}
+            self.creature_data[creature] = {"kills": 0, "zones": [], "items": {}, "skinning": {}, "butchering": {}}
 
         items = self.creature_data[creature]["items"]
         creature_zones = self.creature_data[creature].get("zones", [])
@@ -1370,8 +1513,9 @@ class LootParser:
         items = data.get("items", {})
         creature_zones = data.get("zones", [])
         skinning = data.get("skinning", {})
+        butchering = data.get("butchering", {})
 
-        if not items and not skinning:
+        if not items and not skinning and not butchering:
             return "== Reported Loot ==\nNo loot reported yet.\n"
 
         # Categorize items by zone
@@ -1418,6 +1562,14 @@ class LootParser:
             lines.append("== Skinning ==")
             lines.append("{|")
             lines.extend(self._format_loot_table(sorted(skinning.keys())))
+            lines.append("|}")
+            lines.append("")
+
+        # Butchering section
+        if butchering:
+            lines.append("== Butchering ==")
+            lines.append("{|")
+            lines.extend(self._format_loot_table(sorted(butchering.keys())))
             lines.append("|}")
             lines.append("")
 
