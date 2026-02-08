@@ -781,6 +781,10 @@ class LootParser:
         self._save_creature_data()
         self._generate_wiki_files()
 
+        # Mirror Player.log to keep it up to date
+        if self.player_log_path.exists():
+            self._mirror_log_file(self.player_log_path)
+
         return results
 
     def _generate_wiki_files(self):
@@ -942,18 +946,20 @@ class LootParser:
 
                         # Check for fatality
                         if self.FATALITY_PATTERN.search(message) and current_creature:
+                            # Always track kill state for loot attribution
+                            creature_killed = True
+                            kill_timestamp = current_timestamp
+
                             # Check if this entry is newer than what we've already processed
                             last_updated = None
                             if current_creature in self.creature_data:
                                 last_updated = self.creature_data[current_creature].get("last_updated")
 
                             if not self._is_timestamp_newer(current_utc_timestamp, last_updated):
-                                # Skip this entry - we've already processed it
+                                # Skip incrementing kills - we've already counted this kill
+                                # But keep creature_killed=True so loot can still be attributed
                                 stats["skipped_old"] += 1
                                 continue
-
-                            creature_killed = True
-                            kill_timestamp = current_timestamp
 
                             # Create creature entry if new
                             if current_creature not in self.creature_data:
@@ -1192,6 +1198,15 @@ class LootParser:
             }
 
         return stats
+
+    def extract_creature_name_from_wiki(self, wiki_text: str) -> str | None:
+        """Extract creature name from MOB infobox title field."""
+        # Pattern: {{MOB infobox | title = Creature Name | ...}}
+        pattern = re.compile(r'\{\{MOB\s+infobox[^}]*\|\s*title\s*=\s*([^|}\n]+)', re.IGNORECASE | re.DOTALL)
+        match = pattern.search(wiki_text)
+        if match:
+            return match.group(1).strip()
+        return None
 
     def parse_wiki_loot(self, wiki_text: str) -> dict[str, list[str]]:
         """

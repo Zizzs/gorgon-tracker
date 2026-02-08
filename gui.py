@@ -472,6 +472,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.wiki_textbox.pack(fill="both", expand=True, padx=5, pady=5)
         self.wiki_textbox.insert("1.0", "Select a creature to view wiki syntax")
+        self.wiki_textbox.bind("<KeyRelease>", self._on_wiki_text_changed)
 
         # Button frame for Sync
         wiki_button_frame = ctk.CTkFrame(self.wiki_tab, fg_color="transparent")
@@ -486,6 +487,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             font=ctk.CTkFont(size=13, weight="bold")
         )
         self.wiki_sync_button.pack(side="left")
+        self.wiki_sync_button.configure(state="disabled")
 
         self.wiki_open_button = ctk.CTkButton(
             wiki_button_frame,
@@ -501,9 +503,10 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             wiki_button_frame,
             text="",
             font=ctk.CTkFont(size=11),
-            text_color="#4CAF50"
+            text_color="#4CAF50",
+            wraplength=250
         )
-        self.wiki_status.pack(side="left", padx=10)
+        self.wiki_status.pack(side="left", padx=10, fill="x", expand=True)
 
     def _create_options_view(self):
         """Create the options view."""
@@ -1426,7 +1429,8 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         """Clear wiki textbox and show placeholder for user input."""
         self.wiki_textbox.configure(state="normal")
         self.wiki_textbox.delete("1.0", "end")
-        # Leave empty - the instruction label above already tells user what to do
+        self.wiki_status.configure(text="")
+        self.wiki_sync_button.configure(state="disabled")
 
     def _update_wiki_syntax(self, creature_name: str, stats: dict):
         """Update the wiki syntax textbox with zone-aware output."""
@@ -1451,6 +1455,73 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         wiki_name = self.selected_creature.replace(' ', '_')
         url = f"https://wiki.projectgorgon.com/wiki/{wiki_name}"
         webbrowser.open(url)
+
+    def _on_wiki_text_changed(self, event=None):
+        """Analyze pasted wiki content and show status."""
+        if not self.selected_creature or not self.parser:
+            self.wiki_sync_button.configure(state="disabled")
+            return
+
+        wiki_text = self.wiki_textbox.get("1.0", "end-1c").strip()
+
+        # No content - disable sync
+        if not wiki_text or wiki_text == "Select a creature to view wiki syntax":
+            self.wiki_status.configure(text="")
+            self.wiki_sync_button.configure(state="disabled")
+            return
+
+        # Extract creature name from wiki content
+        wiki_creature = self.parser.extract_creature_name_from_wiki(wiki_text)
+
+        # Check if creature name matches
+        if wiki_creature and wiki_creature != self.selected_creature:
+            self.wiki_status.configure(
+                text=f'Wrong creature! You entered "{wiki_creature}". Expected "{self.selected_creature}".',
+                text_color="#F44336"  # Red
+            )
+            self.wiki_sync_button.configure(state="disabled")
+            return
+
+        # Parse wiki items
+        wiki_items = self.parser.parse_wiki_loot(wiki_text)
+
+        # No valid loot items found - disable sync
+        if not wiki_items:
+            self.wiki_status.configure(
+                text="No loot items found in wiki content",
+                text_color="#FF9800"  # Orange
+            )
+            self.wiki_sync_button.configure(state="disabled")
+            return
+
+        # Valid content - enable sync button
+        self.wiki_sync_button.configure(state="normal")
+
+        # Get our items for comparison
+        creature_data = self.parser.creature_data.get(self.selected_creature, {})
+        our_items = creature_data.get("items", {})
+        our_item_names = set(our_items.keys())
+
+        # Flatten wiki items to set of names
+        wiki_item_names = set()
+        for items in wiki_items.values():
+            wiki_item_names.update(items)
+
+        # Find items we have that wiki doesn't
+        items_to_add = our_item_names - wiki_item_names
+        items_to_add = {name for name in items_to_add
+                        if not our_items.get(name, {}).get("wiki_only", False)}
+
+        if items_to_add:
+            self.wiki_status.configure(
+                text=f"Wiki is missing {len(items_to_add)} item(s) from your data",
+                text_color="#FF9800"  # Orange
+            )
+        else:
+            self.wiki_status.configure(
+                text="Wiki content looks up to date",
+                text_color="#4CAF50"  # Green
+            )
 
     def _sync_wiki(self):
         """Sync pasted wiki content with our database."""
@@ -1489,18 +1560,29 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         # Refresh the info tab to show new items
         self._refresh_loot_display()
 
-        # Show status
-        added = merge_stats["added"]
-        existing = merge_stats["existing"]
-        if added > 0:
+        # Show status - count items we added to the wiki
+        creature_data = self.parser.creature_data.get(self.selected_creature, {})
+        our_items = creature_data.get("items", {})
+        our_item_names = set(our_items.keys())
+
+        # Flatten wiki items to get what wiki already had
+        wiki_item_names = set()
+        for items in wiki_items.values():
+            wiki_item_names.update(items)
+
+        # Items we added to wiki = our items minus wiki items (excluding wiki_only)
+        items_added_to_wiki = {name for name in (our_item_names - wiki_item_names)
+                               if not our_items.get(name, {}).get("wiki_only", False)}
+
+        if items_added_to_wiki:
             self.wiki_status.configure(
-                text=f"Synced: {added} new items added, {existing} existing",
+                text=f"Synced! {len(items_added_to_wiki)} items added",
                 text_color="#4CAF50"
             )
-            self._log_message(f"Wiki sync for {self.selected_creature}: +{added} new items")
+            self._log_message(f"Wiki sync for {self.selected_creature}: +{len(items_added_to_wiki)} items added to wiki")
         else:
             self.wiki_status.configure(
-                text=f"Synced: All {existing} items already in database",
+                text="Synced! No new items",
                 text_color="#4CAF50"
             )
 
