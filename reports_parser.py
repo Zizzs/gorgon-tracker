@@ -666,7 +666,6 @@ class ReportsParser:
         if not active_ids:
             return []
 
-        all_item_names = self.get_all_item_names()
         quests = []
 
         for quest_id in active_ids:
@@ -683,29 +682,60 @@ class ReportsParser:
                 "zone": zone,
                 "objectives": [],
                 "has_details": details is not None,
+                "all_items_ready": True,  # True if all item objectives have items
+                "is_turn_in_ready": True,  # True if only Scripted objectives remain incomplete
             }
 
             # Parse objectives if available
             if details and "Objectives" in details:
+                has_item_objectives = False
+                has_incomplete_non_scripted = False
+
                 for obj in details.get("Objectives", []):
+                    obj_type = obj.get("Type", "")
                     obj_info = {
                         "description": obj.get("Description", ""),
-                        "type": obj.get("Type", ""),
+                        "type": obj_type,
                         "target": obj.get("Target"),
                         "count": obj.get("Number", 1),
                         "is_item": False,
                         "has_item": False,
+                        "have_count": 0,
                     }
 
                     # Check if this is an item-related objective
-                    if obj.get("Type") in ["CollectItem", "DeliverItem", "HaveItem"]:
+                    # Actual types: Collect, Have (not CollectItem, DeliverItem, HaveItem)
+                    if obj_type in ["Collect", "Have"]:
                         obj_info["is_item"] = True
+                        has_item_objectives = True
                         item_name = obj.get("ItemName") or obj.get("Target")
                         if item_name:
                             obj_info["item_name"] = item_name
-                            obj_info["has_item"] = item_name in all_item_names
+                            have_count = self.get_item_count(item_name)
+                            obj_info["have_count"] = have_count
+                            obj_info["has_item"] = have_count >= obj_info["count"]
+                            if not obj_info["has_item"]:
+                                quest["all_items_ready"] = False
+
+                    # Track non-Scripted incomplete objectives for turn-in readiness
+                    # We can only check item objectives, so assume others are incomplete
+                    if obj_type != "Scripted":
+                        if obj_info["is_item"]:
+                            if not obj_info["has_item"]:
+                                has_incomplete_non_scripted = True
+                        else:
+                            # For non-item objectives (Kill, Harvest, etc.), we can't check
+                            # so we assume they might be incomplete
+                            has_incomplete_non_scripted = True
 
                     quest["objectives"].append(obj_info)
+
+                # If no item objectives, can't determine readiness
+                if not has_item_objectives:
+                    quest["all_items_ready"] = False
+
+                # Quest is turn-in ready only if all non-Scripted objectives are complete
+                quest["is_turn_in_ready"] = not has_incomplete_non_scripted
 
             quests.append(quest)
 

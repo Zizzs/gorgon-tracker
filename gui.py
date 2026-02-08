@@ -694,12 +694,53 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.quests_status.pack(anchor="w", padx=10, pady=(5, 5))
 
-        # Scrollable quest list
-        self.quests_scroll = ctk.CTkScrollableFrame(tab)
-        self.quests_scroll.pack(fill="both", expand=True, padx=0, pady=5)
+        # Use Treeview for performance (handles many items efficiently)
+        tree_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # Quest zone expanded states
-        self.quest_zone_expanded = {}
+        # Single column tree with hierarchy: Zone > Quest > Objectives
+        self.quests_tree = ttk.Treeview(
+            tree_frame,
+            columns=("status",),
+            show="tree headings",
+            style="Dark.Treeview"
+        )
+
+        # Sort state for quests (None = zone grouping, True = ready first, False = ready last)
+        self.quests_sort_ready_first = True  # Default: ready quests at top
+
+        # Column configuration
+        self.quests_tree.heading("#0", text="Quest / Objective", anchor="w")
+        self.quests_tree.heading("status", text="Status", anchor="center",
+                                  command=self._sort_quests_by_status)
+        self.quests_tree.column("#0", width=220, minwidth=150, anchor="w")
+        self.quests_tree.column("status", width=60, minwidth=40, anchor="center")
+
+        # Color tags for quest/objective status
+        self.quests_tree.tag_configure("zone", foreground="#AAAAAA")  # Gray for zones
+        self.quests_tree.tag_configure("ready", foreground="#2196F3")  # Blue - turn in ready
+        self.quests_tree.tag_configure("quest", foreground="#FFFFFF")  # White - in progress
+        self.quests_tree.tag_configure("complete", foreground="#4CAF50")  # Green - item objective done
+        self.quests_tree.tag_configure("incomplete", foreground="#F44336")  # Red - item objective missing
+        self.quests_tree.tag_configure("other", foreground="#9E9E9E")  # Gray - non-item objectives
+
+        # Scrollbar
+        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.quests_tree.yview)
+        self.quests_tree.configure(yscrollcommand=scrollbar.set)
+
+        self.quests_tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Double-click to open wiki page
+        self.quests_tree.bind("<Double-1>", self._on_quest_double_click)
+
+        # Hover effects for quest links
+        self.quests_tree.bind("<Motion>", self._on_quest_hover)
+        self.quests_tree.bind("<Leave>", self._on_quest_leave)
+        self.quest_hover_item = None  # Track currently hovered item
+
+        # Store quest names for wiki lookup (tree item id -> quest name)
+        self.quest_item_names = {}
 
     def _refresh_reports_data(self):
         """Refresh reports data for currently visible tab only (lazy loading)."""
@@ -950,12 +991,12 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _refresh_quests_tab(self):
         """Refresh the Quests tab content."""
-        if not hasattr(self, 'quests_scroll'):
+        if not hasattr(self, 'quests_tree'):
             return
 
         # Clear existing content
-        for widget in self.quests_scroll.winfo_children():
-            widget.destroy()
+        self.quests_tree.delete(*self.quests_tree.get_children())
+        self.quest_item_names.clear()
 
         # Load quest data
         active_quests = self.reports_parser.get_active_quest_ids()
@@ -979,90 +1020,211 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             return
 
         total_quests = sum(len(q) for q in quests_by_zone.values())
-        self.quests_status.configure(text=f"{total_quests} active quests")
+        ready_count = sum(1 for quests in quests_by_zone.values()
+                         for q in quests if q.get("all_items_ready"))
 
-        # Get all item names for matching
-        all_items = self.reports_parser.get_all_item_names()
+        # Update status with ready count and sort indicator
+        sort_indicator = ""
+        if self.quests_sort_ready_first is True:
+            sort_indicator = " \u25b2"  # Up arrow - ready first
+        elif self.quests_sort_ready_first is False:
+            sort_indicator = " \u25bc"  # Down arrow - ready last
 
-        # Display quests grouped by zone
-        for zone in sorted(quests_by_zone.keys()):
-            quests = quests_by_zone[zone]
+        self.quests_status.configure(
+            text=f"{total_quests} quests ({ready_count} ready)"
+        )
 
-            # Initialize zone expanded state
-            if zone not in self.quest_zone_expanded:
-                self.quest_zone_expanded[zone] = True
+        # Update heading with sort arrow
+        if self.quests_sort_ready_first is True:
+            self.quests_tree.heading("status", text="Status \u25b2")
+        elif self.quests_sort_ready_first is False:
+            self.quests_tree.heading("status", text="Status \u25bc")
+        else:
+            self.quests_tree.heading("status", text="Status")
 
-            # Zone header
-            arrow = "\u25bc" if self.quest_zone_expanded[zone] else "\u25b6"
-            zone_btn = ctk.CTkButton(
-                self.quests_scroll,
-                text=f"{arrow} {zone} ({len(quests)})",
-                anchor="w",
-                fg_color=("gray85", "gray25"),
-                text_color=("gray10", "gray90"),
-                hover_color=("gray75", "gray35"),
-                font=ctk.CTkFont(size=11, weight="bold"),
-                command=lambda z=zone: self._toggle_quest_zone(z)
+        # If sorting by status, flatten the view (no zone grouping)
+        if self.quests_sort_ready_first is not None:
+            # Flatten all quests into a single list
+            all_quests = []
+            for zone, quests in quests_by_zone.items():
+                for quest in quests:
+                    quest["zone"] = zone
+                    all_quests.append(quest)
+
+            # Sort by ready status
+            all_quests.sort(
+                key=lambda q: (q.get("all_items_ready", False), q.get("name", "")),
+                reverse=self.quests_sort_ready_first
             )
-            zone_btn.pack(fill="x", pady=(5, 2))
 
-            if not self.quest_zone_expanded[zone]:
-                continue
-
-            # Display quests in this zone
-            for quest in quests:
-                quest_frame = ctk.CTkFrame(self.quests_scroll, fg_color="transparent")
-                quest_frame.pack(fill="x", padx=(15, 5), pady=2)
-
-                # Quest name
+            # Display flat list
+            for quest in all_quests:
                 quest_name = quest.get("name", quest.get("id", "Unknown"))
-                name_text = quest_name[:35] + "..." if len(quest_name) > 35 else quest_name
+                zone = quest.get("zone", "Unknown")
 
-                ctk.CTkLabel(
-                    quest_frame,
-                    text=name_text,
-                    font=ctk.CTkFont(size=11),
-                    anchor="w"
-                ).pack(anchor="w")
+                # Determine quest status - green checkmark if all items ready
+                if quest.get("all_items_ready"):
+                    quest_tag = "complete"  # Green
+                    quest_status = "\u2713"  # Checkmark
+                elif quest.get("is_turn_in_ready"):
+                    quest_tag = "ready"  # Blue
+                    quest_status = "Ready"
+                else:
+                    quest_tag = "quest"  # White
+                    quest_status = ""
 
-                # Display objectives if available
-                for obj in quest.get("objectives", [])[:3]:  # Show first 3 objectives
-                    obj_frame = ctk.CTkFrame(quest_frame, fg_color="transparent")
-                    obj_frame.pack(fill="x", padx=(10, 0))
+                display_text = f"{quest_name} ({zone})"
+                quest_id = self.quests_tree.insert(
+                    "", "end",
+                    text=display_text,
+                    values=(quest_status,),
+                    tags=(quest_tag,),
+                    open=True
+                )
+                self.quest_item_names[quest_id] = (quest_name, display_text)
 
-                    # Status indicator
-                    if obj.get("is_item"):
-                        has_item = obj.get("has_item", False)
-                        indicator = "\u2713" if has_item else "\u2717"
-                        color = "#4CAF50" if has_item else "#F44336"
+                # Display objectives
+                self._insert_quest_objectives(quest_id, quest)
+        else:
+            # Display quests grouped by zone using Treeview hierarchy
+            for zone in sorted(quests_by_zone.keys()):
+                quests = quests_by_zone[zone]
+
+                # Zone header (parent node)
+                zone_id = self.quests_tree.insert(
+                    "", "end",
+                    text=f"{zone} ({len(quests)})",
+                    values=("",),
+                    tags=("zone",),
+                    open=True
+                )
+
+                # Display quests in this zone
+                for quest in quests:
+                    quest_name = quest.get("name", quest.get("id", "Unknown"))
+
+                    # Determine quest status - green checkmark if all items ready
+                    if quest.get("all_items_ready"):
+                        quest_tag = "complete"  # Green
+                        quest_status = "\u2713"  # Checkmark
+                    elif quest.get("is_turn_in_ready"):
+                        quest_tag = "ready"  # Blue
+                        quest_status = "Ready"
                     else:
-                        indicator = "?"
-                        color = "gray"
+                        quest_tag = "quest"  # White
+                        quest_status = ""
 
-                    ctk.CTkLabel(
-                        obj_frame,
-                        text=indicator,
-                        font=ctk.CTkFont(size=10),
-                        text_color=color,
-                        width=15
-                    ).pack(side="left")
+                    quest_id = self.quests_tree.insert(
+                        zone_id, "end",
+                        text=quest_name,
+                        values=(quest_status,),
+                        tags=(quest_tag,),
+                        open=True
+                    )
+                    self.quest_item_names[quest_id] = (quest_name, quest_name)
 
-                    # Objective description (truncated)
-                    desc = obj.get("description", "")
-                    desc_text = desc[:40] + "..." if len(desc) > 40 else desc
+                    # Display objectives
+                    self._insert_quest_objectives(quest_id, quest)
 
-                    ctk.CTkLabel(
-                        obj_frame,
-                        text=desc_text,
-                        font=ctk.CTkFont(size=10),
-                        text_color="gray",
-                        anchor="w"
-                    ).pack(side="left", fill="x")
+    def _insert_quest_objectives(self, quest_id: str, quest: dict):
+        """Insert objective items under a quest in the tree."""
+        for obj in quest.get("objectives", []):
+            desc = obj.get("description", "")
+            count = obj.get("count", 1)
 
-    def _toggle_quest_zone(self, zone: str):
-        """Toggle quest zone expanded state."""
-        self.quest_zone_expanded[zone] = not self.quest_zone_expanded.get(zone, True)
+            # Format text with counts
+            if obj.get("is_item"):
+                have_count = obj.get("have_count", 0)
+                text = f"{desc} ({have_count}/{count})"
+                # Status indicator
+                if obj.get("has_item"):
+                    tag = "complete"
+                    status = "\u2713"  # Checkmark
+                else:
+                    tag = "incomplete"
+                    status = "\u2717"  # X mark
+            else:
+                # Non-item objectives (Kill, Harvest, Scripted, etc.)
+                if count > 1:
+                    text = f"{desc} ({count})"
+                else:
+                    text = desc
+                tag = "other"
+                status = "-"
+
+            self.quests_tree.insert(
+                quest_id, "end",
+                text=text,
+                values=(status,),
+                tags=(tag,)
+            )
+
+    def _sort_quests_by_status(self):
+        """Toggle quest sorting by completion status."""
+        if self.quests_sort_ready_first is None:
+            self.quests_sort_ready_first = True  # Ready first
+        elif self.quests_sort_ready_first is True:
+            self.quests_sort_ready_first = False  # Ready last
+        else:
+            self.quests_sort_ready_first = None  # No sort (zone grouping)
+
         self._refresh_quests_tab()
+
+    def _on_quest_double_click(self, event):
+        """Handle double-click on quest to open wiki page."""
+        item_id = self.quests_tree.identify_row(event.y)
+        if not item_id:
+            return
+
+        # Check if this is a quest (not a zone or objective)
+        quest_data = self.quest_item_names.get(item_id)
+        if not quest_data:
+            return
+
+        quest_name = quest_data[0]  # First element is the quest name
+
+        # Build wiki URL - replace spaces with underscores
+        wiki_name = quest_name.replace(" ", "_")
+        url = f"https://wiki.projectgorgon.com/wiki/{wiki_name}"
+        webbrowser.open(url)
+
+    def _on_quest_hover(self, event):
+        """Handle mouse hover over quest items - show underline and hand cursor."""
+        item_id = self.quests_tree.identify_row(event.y)
+
+        # If hovering over same item, do nothing
+        if item_id == self.quest_hover_item:
+            return
+
+        # Remove underline from previous item
+        if self.quest_hover_item and self.quest_hover_item in self.quest_item_names:
+            self._set_quest_underline(self.quest_hover_item, underline=False)
+
+        # Check if this is a quest (not a zone or objective)
+        if item_id and item_id in self.quest_item_names:
+            self._set_quest_underline(item_id, underline=True)
+            self.quests_tree.configure(cursor="hand2")
+            self.quest_hover_item = item_id
+        else:
+            self.quests_tree.configure(cursor="")
+            self.quest_hover_item = None
+
+    def _on_quest_leave(self, event):
+        """Handle mouse leaving the quest tree - remove underline."""
+        if self.quest_hover_item and self.quest_hover_item in self.quest_item_names:
+            self._set_quest_underline(self.quest_hover_item, underline=False)
+        self.quests_tree.configure(cursor="")
+        self.quest_hover_item = None
+
+    def _set_quest_underline(self, item_id: str, underline: bool):
+        """Set or remove underline on a quest item using Unicode combining underline."""
+        quest_name, display_text = self.quest_item_names.get(item_id, ("", ""))
+        if underline:
+            # Add underline using Unicode combining character
+            self.quests_tree.item(item_id, text="\u0332".join(display_text) + "\u0332")
+        else:
+            # Restore original display text
+            self.quests_tree.item(item_id, text=display_text)
 
     def _create_detail_panel(self, parent):
         """Create the right panel with stacked detail and options views."""
