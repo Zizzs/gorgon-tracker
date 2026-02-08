@@ -7,11 +7,14 @@ import re
 import os
 import sys
 import json
+import shutil
 import urllib.request
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
 from collections import defaultdict
+
+from paths import get_gorgon_tracker_data_dir, get_pg_chatlog_dir
 
 
 # Known item prefixes to strip for base item names
@@ -50,6 +53,7 @@ ZONE_NAMES = {
     "AreaWinterNexus": "Winter Nexus",
     "AreaLabyrinth": "Labyrinth",
     "AreaGoblinDungeon": "Goblin Dungeon",
+    "AreaCave1": "Goblin Dungeon",
     "AreaMyconian": "Myconian Cave",
     "AreaAnagoge": "Anagoge Island",
     "AreaNewbie2": "Anagoge Records Facility",
@@ -148,15 +152,37 @@ class LootParser:
     # Pattern to extract timezone offset from chat log login line
     TIMEZONE_PATTERN = re.compile(r'Timezone Offset ([+-])(\d{2}):(\d{2}):(\d{2})')
 
-    def __init__(self, chatlog_dir: str, output_dir: str = "CreaturePages",
-                 state_file: str = "processed_logs.json", data_file: str = "creature_data.json"):
-        self.chatlog_dir = Path(chatlog_dir)
+    def __init__(self, chatlog_dir: str = None, output_dir: str = "CreaturePages",
+                 storage_dir: Path = None):
+        # Storage directory - defaults to AppData/LocalLow/GorgonTracker
+        if storage_dir is None:
+            storage_dir = get_gorgon_tracker_data_dir()
+        self.storage_dir = Path(storage_dir)
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+
+        # Data files now stored in storage_dir
+        self.data_file = self.storage_dir / "creature_data.json"
+        self.state_file = self.storage_dir / "processed_logs.json"
+
+        # Mirror directory for log files
+        self.mirror_dir = self.storage_dir / "PlayerLogs"
+        self.mirror_dir.mkdir(parents=True, exist_ok=True)
+
+        # Chatlog directory - auto-detect if not provided
+        if chatlog_dir:
+            self.chatlog_dir = Path(chatlog_dir)
+        else:
+            detected_dir = get_pg_chatlog_dir()
+            if detected_dir:
+                self.chatlog_dir = detected_dir
+            else:
+                # Fallback to empty path - will fail gracefully when processing
+                self.chatlog_dir = Path("")
+
         self.output_dir = Path(output_dir)
-        self.state_file = Path(state_file)
-        self.data_file = Path(data_file)
 
         # Player.log is in parent directory of ChatLogs
-        self.player_log_path = self.chatlog_dir.parent / "Player.log"
+        self.player_log_path = self.chatlog_dir.parent / "Player.log" if self.chatlog_dir.exists() else Path("")
 
         # Current parsing state
         self.current_creature: Optional[str] = None
@@ -176,6 +202,9 @@ class LootParser:
         # Timezone offset from chat log (hours to subtract from local to get UTC)
         self._timezone_offset_hours = 0
 
+        # Migrate legacy data from project root if needed
+        self._migrate_legacy_data()
+
         # Load creature data (source of truth)
         self.creature_data = self._load_creature_data()
 
@@ -183,9 +212,7 @@ class LootParser:
         self.processed_state = self._load_state()
 
         # Load valid item names from PG database
-        # Use absolute path to ensure cache is found regardless of working directory
-        cache_dir = self.data_file.resolve().parent
-        self.valid_items = load_valid_items(cache_dir)
+        self.valid_items = load_valid_items(self.storage_dir)
 
     def _load_state(self) -> dict:
         """Load the processed logs state file."""
@@ -198,6 +225,66 @@ class LootParser:
         """Save the processed logs state file."""
         with open(self.state_file, 'w', encoding='utf-8') as f:
             json.dump(self.processed_state, f, indent=2)
+
+    def _migrate_legacy_data(self):
+        """
+        Migrate data files from legacy locations (project root) to new storage directory.
+        Only migrates if the new location doesn't have the files yet.
+        """
+        # Get the project root (where the script is located)
+        if getattr(sys, 'frozen', False):
+            # Running as compiled executable
+            project_root = Path(sys.executable).parent
+        else:
+            # Running as script
+            project_root = Path(__file__).parent
+
+        legacy_files = [
+            ("creature_data.json", self.data_file),
+            ("processed_logs.json", self.state_file),
+            ("items_cache.json", self.storage_dir / "items_cache.json"),
+        ]
+
+        for legacy_name, new_path in legacy_files:
+            legacy_path = project_root / legacy_name
+
+            # Only migrate if legacy exists and new doesn't
+            if legacy_path.exists() and not new_path.exists():
+                try:
+                    shutil.copy2(legacy_path, new_path)
+                    print(f"Migrated {legacy_name} to {new_path}")
+                except Exception as e:
+                    print(f"Warning: Could not migrate {legacy_name}: {e}")
+
+    def _mirror_log_file(self, source_path: Path):
+        """
+        Mirror a single log file to the PlayerLogs directory.
+
+        Args:
+            source_path: Path to the source log file
+        """
+        if not source_path.exists():
+            return
+
+        dest_path = self.mirror_dir / source_path.name
+
+        try:
+            shutil.copy2(source_path, dest_path)
+        except Exception as e:
+            print(f"Warning: Could not mirror {source_path.name}: {e}")
+
+    def _mirror_all_logs(self):
+        """Mirror all Chat-*.log files and Player.log to PlayerLogs directory."""
+        if not self.chatlog_dir.exists():
+            return
+
+        # Mirror all Chat-*.log files
+        for log_file in self.chatlog_dir.glob("Chat-*.log"):
+            self._mirror_log_file(log_file)
+
+        # Mirror Player.log
+        if self.player_log_path.exists():
+            self._mirror_log_file(self.player_log_path)
 
     def _load_creature_data(self) -> dict:
         """
@@ -475,7 +562,7 @@ class LootParser:
 
         if channel == "Combat":
             # Check for combat target
-            target_match = self.COMBAT_TARGET_PATTERN.match(message)
+            target_match = self.COMBAT_TARGET_PATTERN.search(message)
             if target_match:
                 creature_name = target_match.group(1)
                 # New combat target - reset kill state
@@ -483,9 +570,18 @@ class LootParser:
                     self.current_creature = creature_name
                     self.creature_killed = False
                     self.kill_timestamp = None
+
+                # Check for fatality ON THE SAME LINE
+                if self.FATALITY_PATTERN.search(message):
+                    self.creature_killed = True
+                    self.kill_timestamp = timestamp
+                    if self.current_creature:
+                        self._record_kill(self.current_creature, self.current_zone)
+                    return {"type": "kill", "creature": self.current_creature, "zone": self.current_zone}
+
                 return {"type": "combat", "creature": creature_name, "zone": self.current_zone}
 
-            # Check for fatality
+            # Check for fatality without target (edge case)
             if self.FATALITY_PATTERN.search(message):
                 self.creature_killed = True
                 self.kill_timestamp = timestamp
@@ -658,6 +754,9 @@ class LootParser:
             self.last_loot = None
 
             new_loot = self.parse_log_file(log_file, callback)
+
+            # Mirror the processed log file
+            self._mirror_log_file(log_file)
 
             for creature, items in new_loot.items():
                 all_new_loot[creature].update(items)
@@ -960,6 +1059,9 @@ class LootParser:
 
         self._save_creature_data()
 
+        # Mirror all log files after full rescan
+        self._mirror_all_logs()
+
         if callback:
             callback(f"Rescan complete: {stats['new_creatures']} new creatures, {stats['new_items']} new items, {stats['new_skinning']} new skinning")
             if stats["skipped_old"] > 0:
@@ -995,7 +1097,7 @@ class LootParser:
 
                     if channel == "Combat":
                         # Track current creature target
-                        target_match = self.COMBAT_TARGET_PATTERN.match(message)
+                        target_match = self.COMBAT_TARGET_PATTERN.search(message)
                         if target_match:
                             current_creature = target_match.group(1)
 
