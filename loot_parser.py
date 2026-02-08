@@ -108,7 +108,7 @@ def load_valid_items(cache_dir: Path) -> set:
                 with open(cache_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     return set(data.get("names", []))
-            except:
+            except (json.JSONDecodeError, IOError, OSError):
                 pass
 
     # Download fresh data
@@ -119,8 +119,10 @@ def load_valid_items(cache_dir: Path) -> set:
         )
         with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode('utf-8'))
+            if not isinstance(data, dict):
+                raise ValueError("Invalid items database format")
             for item_id, item_data in data.items():
-                if "Name" in item_data:
+                if isinstance(item_data, dict) and "Name" in item_data:
                     items_set.add(item_data["Name"])
 
             # Cache for later
@@ -377,16 +379,18 @@ class LootParser:
         """Get the zone the player was in at a given timestamp.
 
         Note: timestamp is in local time, zone_transitions are in UTC.
-        We compare only the time portion (HH:MM:SS) to avoid date mismatch
-        issues when UTC conversion crosses midnight.
+        We compare full datetime objects to correctly handle midnight crossings.
         """
-        # Convert local timestamp to UTC time-of-day for comparison
-        utc_time = (timestamp - timedelta(hours=self._timezone_offset_hours)).time()
+        if not self.zone_transitions:
+            return None
+
+        # Convert local timestamp to full UTC datetime for comparison
+        utc_timestamp = timestamp - timedelta(hours=self._timezone_offset_hours)
 
         current_zone = None
 
         for zone_time, zone_name in self.zone_transitions:
-            if zone_time.time() <= utc_time:
+            if zone_time <= utc_timestamp:
                 current_zone = zone_name
             else:
                 break

@@ -57,6 +57,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.auto_update_job = None
         self.last_update_timestamp = None  # ISO format string or None
 
+        # Thread synchronization for shared data
+        self._data_lock = threading.Lock()
+
         # Load settings
         self._load_settings()
 
@@ -1057,10 +1060,12 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _format_last_update(self) -> str:
         """Format the last update timestamp for display."""
-        if not self.last_update_timestamp:
+        with self._data_lock:
+            timestamp = self.last_update_timestamp
+        if not timestamp:
             return "Last update: Never"
         try:
-            dt = datetime.fromisoformat(self.last_update_timestamp)
+            dt = datetime.fromisoformat(timestamp)
             return f"Last update: {dt.strftime('%Y-%m-%d %H:%M')}"
         except (ValueError, TypeError):
             return "Last update: Never"
@@ -1126,8 +1131,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             try:
                 self._log_message("Starting incremental update...")
 
-                # Process new log entries only
-                results = self.parser.process_all_logs(callback=self._log_message)
+                # Process new log entries only (with lock to protect shared data)
+                with self._data_lock:
+                    results = self.parser.process_all_logs(callback=self._log_message)
 
                 # Summarize results
                 if results:
@@ -1137,9 +1143,10 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
                 self._log_message("Done!")
 
-                # Update timestamp on success
+                # Update timestamp on success (scheduled on main thread)
                 def update_timestamp():
-                    self.last_update_timestamp = datetime.now().isoformat()
+                    with self._data_lock:
+                        self.last_update_timestamp = datetime.now().isoformat()
                     self._save_settings()
                     self._update_last_update_label()
                 self.after(0, update_timestamp)
@@ -1175,8 +1182,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             try:
                 self._log_message("Starting full rescan...")
 
-                # Full rescan to re-read all chat logs
-                rescan_stats = self.parser.full_rescan(callback=self._log_message)
+                # Full rescan to re-read all chat logs (with lock to protect shared data)
+                with self._data_lock:
+                    rescan_stats = self.parser.full_rescan(callback=self._log_message)
 
                 # Summarize results
                 new_creatures = rescan_stats.get("new_creatures", 0)
@@ -1188,9 +1196,10 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
                 self._log_message("Done!")
 
-                # Update timestamp on success
+                # Update timestamp on success (scheduled on main thread)
                 def update_timestamp():
-                    self.last_update_timestamp = datetime.now().isoformat()
+                    with self._data_lock:
+                        self.last_update_timestamp = datetime.now().isoformat()
                     self._save_settings()
                     self._update_last_update_label()
                 self.after(0, update_timestamp)
@@ -1227,14 +1236,16 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         if not hasattr(self, 'zone_expanded'):
             self.zone_expanded = {}
 
-        # Group creatures by zone
+        # Group creatures by zone (with lock to protect shared data)
         creatures_by_zone = {}
-        for creature, data in self.parser.creature_data.items():
-            zones = data.get("zones", ["Unknown"])
-            zone = zones[0] if zones else "Unknown"
-            if zone not in creatures_by_zone:
-                creatures_by_zone[zone] = []
-            creatures_by_zone[zone].append((creature, data))
+        with self._data_lock:
+            for creature, data in self.parser.creature_data.items():
+                zones = data.get("zones", ["Unknown"])
+                zone = zones[0] if zones else "Unknown"
+                if zone not in creatures_by_zone:
+                    creatures_by_zone[zone] = []
+                # Copy the data we need to avoid holding lock too long
+                creatures_by_zone[zone].append((creature, {"kills": data.get("kills", 0)}))
 
         # Sort zones alphabetically, sort creatures within each zone by kills
         for zone in sorted(creatures_by_zone.keys()):
@@ -1326,8 +1337,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         self.selected_creature = creature_name
 
-        # Get creature stats
-        stats = self.parser.get_creature_stats(creature_name)
+        # Get creature stats (with lock to protect shared data)
+        with self._data_lock:
+            stats = self.parser.get_creature_stats(creature_name)
         if not stats:
             return
 
