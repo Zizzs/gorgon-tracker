@@ -139,6 +139,8 @@ class LootParser:
     LOOT_PATTERN = re.compile(r'^(.+?)(?: x(\d+))? added to inventory\.$')
     SKINNING_XP_PATTERN = re.compile(r'^You earned \d+ XP in Skinning\.$')
     BUTCHERING_XP_PATTERN = re.compile(r'^You earned \d+ XP in Butchering\.$')
+    # Any XP message (to reset skinning_active when we see non-skinning XP)
+    ANY_XP_PATTERN = re.compile(r'^You earned \d+ XP in .+\.$')
 
     # Regex patterns for Player.log
     PLAYER_LOG_ZONE_PATTERN = re.compile(r'^\[(\d{2}:\d{2}:\d{2})\] LOADING LEVEL (.+)$')
@@ -160,9 +162,10 @@ class LootParser:
         self.current_creature: Optional[str] = None
         self.creature_killed = False
         self.current_zone: Optional[str] = None
-        self.skinning_active = False  # True after skinning XP message
         self.kill_timestamp: Optional[datetime] = None  # When the kill happened
         self.loot_window_seconds = 30  # Max seconds after kill to attribute loot
+        # Track last loot for retrospective skinning detection
+        self.last_loot: Optional[dict] = None  # {creature, base_name, count, timestamp}
 
         # Zone transitions parsed from Player.log (time -> zone)
         self.zone_transitions: list[tuple[datetime, str]] = []
@@ -491,9 +494,27 @@ class LootParser:
                 return {"type": "kill", "creature": self.current_creature, "zone": self.current_zone}
 
         elif channel == "Status":
-            # Check for skinning/butchering XP (marks next loot as skinning)
+            # Check for skinning/butchering XP - retrospectively classify last loot as skinning
             if self.SKINNING_XP_PATTERN.match(message) or self.BUTCHERING_XP_PATTERN.match(message):
-                self.skinning_active = True
+                # If there was loot within 2 seconds, reclassify it as skinning
+                if self.last_loot and timestamp:
+                    time_diff = (timestamp - self.last_loot["timestamp"]).total_seconds()
+                    if 0 <= time_diff <= 2:
+                        creature = self.last_loot["creature"]
+                        base_name = self.last_loot["base_name"]
+                        count = self.last_loot["count"]
+
+                        # Move from regular loot to skinning
+                        if creature in self.creature_data:
+                            items = self.creature_data[creature].get("items", {})
+                            if base_name in items:
+                                # Remove from regular loot
+                                del items[base_name]
+                            # Add to skinning
+                            self._record_skinning(creature, base_name, count)
+                            self._save_creature_data()
+
+                self.last_loot = None
                 return {"type": "skinning_xp", "creature": self.current_creature}
 
             # Check for loot
@@ -509,24 +530,17 @@ class LootParser:
                     time_since_kill = (timestamp - self.kill_timestamp).total_seconds()
                     in_loot_window = 0 <= time_since_kill <= self.loot_window_seconds
 
-                # Check if this is skinning loot (skinning is valid within loot window)
-                if self.skinning_active and self.current_creature and in_loot_window:
-                    is_new = self._record_skinning(self.current_creature, base_name, count)
-                    self.skinning_active = False  # Reset after capturing
-                    return {
-                        "type": "skinning",
-                        "creature": self.current_creature,
-                        "item": item_name,
-                        "base_name": base_name,
-                        "count": count,
-                        "is_new": is_new,
-                        "zone": self.current_zone
-                    }
-
                 # Associate with killed creature (regular loot) only if in loot window
                 if in_loot_window and self.current_creature:
                     is_new = self._record_loot(self.current_creature, base_name, count,
                                                zone=self.current_zone)
+                    # Track this loot for potential skinning reclassification
+                    self.last_loot = {
+                        "creature": self.current_creature,
+                        "base_name": base_name,
+                        "count": count,
+                        "timestamp": timestamp
+                    }
                     return {
                         "type": "loot",
                         "creature": self.current_creature,
@@ -536,9 +550,6 @@ class LootParser:
                         "is_new": is_new,
                         "zone": self.current_zone
                     }
-
-                # Reset skinning flag even if not in loot window
-                self.skinning_active = False
 
         return None
 
@@ -643,8 +654,8 @@ class LootParser:
             self.current_creature = None
             self.creature_killed = False
             self.current_zone = None
-            self.skinning_active = False
             self.kill_timestamp = None
+            self.last_loot = None
 
             new_loot = self.parse_log_file(log_file, callback)
 
@@ -780,10 +791,10 @@ class LootParser:
             # Reset state for this file
             current_creature = None
             creature_killed = False
-            skinning_active = False
             current_zone = None
             current_utc_timestamp = None
             kill_timestamp = None  # Track when the kill happened for loot window
+            last_loot = None  # Track last loot for retrospective skinning detection
 
             with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
                 # First, try to find timezone offset from the login line
@@ -869,9 +880,35 @@ class LootParser:
                                     self.creature_data[current_creature]["zones"] = zones
 
                     elif channel == "Status":
-                        # Skinning/butchering XP
+                        # Skinning/butchering XP - retrospectively classify last loot as skinning
                         if self.SKINNING_XP_PATTERN.match(message) or self.BUTCHERING_XP_PATTERN.match(message):
-                            skinning_active = True
+                            if last_loot and current_timestamp:
+                                time_diff = (current_timestamp - last_loot["timestamp"]).total_seconds()
+                                if 0 <= time_diff <= 2:
+                                    loot_creature = last_loot["creature"]
+                                    loot_base_name = last_loot["base_name"]
+                                    loot_count = last_loot["count"]
+                                    today = datetime.now().strftime("%Y-%m-%d")
+
+                                    if loot_creature in self.creature_data:
+                                        # Remove from regular loot
+                                        items = self.creature_data[loot_creature].get("items", {})
+                                        if loot_base_name in items:
+                                            del items[loot_base_name]
+                                            stats["new_items"] -= 1  # Adjust count
+
+                                        # Add to skinning
+                                        skinning = self.creature_data[loot_creature].setdefault("skinning", {})
+                                        if loot_base_name not in skinning:
+                                            skinning[loot_base_name] = {
+                                                "count": loot_count, "first_seen": today, "last_seen": today
+                                            }
+                                            stats["new_skinning"] += 1
+                                        else:
+                                            skinning[loot_base_name]["count"] += loot_count
+                                            skinning[loot_base_name]["last_seen"] = today
+
+                            last_loot = None
                             continue
 
                         # Check if we're within the loot window (30 seconds after kill)
@@ -888,43 +925,38 @@ class LootParser:
                             base_name = self.strip_prefixes(item_name)
                             today = datetime.now().strftime("%Y-%m-%d")
 
-                            if skinning_active:
-                                # Skinning loot
-                                skinning = self.creature_data[current_creature].setdefault("skinning", {})
-                                if base_name not in skinning:
-                                    skinning[base_name] = {
-                                        "count": count, "first_seen": today, "last_seen": today
-                                    }
-                                    stats["new_skinning"] += 1
-                                else:
-                                    skinning[base_name]["count"] += count
-                                    skinning[base_name]["last_seen"] = today
-                                skinning_active = False
+                            # Regular loot (may be reclassified as skinning later)
+                            items = self.creature_data[current_creature].setdefault("items", {})
+                            if base_name not in items:
+                                items[base_name] = {
+                                    "count": count,
+                                    "first_seen": today,
+                                    "last_seen": today,
+                                    "zones": [current_zone] if current_zone else [],
+                                    "wiki_only": False
+                                }
+                                stats["new_items"] += 1
                             else:
-                                # Regular loot
-                                items = self.creature_data[current_creature].setdefault("items", {})
-                                if base_name not in items:
-                                    items[base_name] = {
-                                        "count": count,
-                                        "first_seen": today,
-                                        "last_seen": today,
-                                        "zones": [current_zone] if current_zone else [],
-                                        "wiki_only": False
-                                    }
-                                    stats["new_items"] += 1
-                                else:
-                                    items[base_name]["count"] += count
-                                    items[base_name]["last_seen"] = today
-                                    # Add zone if not already tracked
-                                    if current_zone:
-                                        item_zones = items[base_name].get("zones", [])
-                                        if current_zone not in item_zones:
-                                            item_zones.append(current_zone)
-                                            item_zones.sort()
-                                            items[base_name]["zones"] = item_zones
-                                    # Ensure wiki_only flag exists
-                                    if "wiki_only" not in items[base_name]:
-                                        items[base_name]["wiki_only"] = False
+                                items[base_name]["count"] += count
+                                items[base_name]["last_seen"] = today
+                                # Add zone if not already tracked
+                                if current_zone:
+                                    item_zones = items[base_name].get("zones", [])
+                                    if current_zone not in item_zones:
+                                        item_zones.append(current_zone)
+                                        item_zones.sort()
+                                        items[base_name]["zones"] = item_zones
+                                # Ensure wiki_only flag exists
+                                if "wiki_only" not in items[base_name]:
+                                    items[base_name]["wiki_only"] = False
+
+                            # Track for potential skinning reclassification
+                            last_loot = {
+                                "creature": current_creature,
+                                "base_name": base_name,
+                                "count": count,
+                                "timestamp": current_timestamp
+                            }
 
         self._save_creature_data()
 
