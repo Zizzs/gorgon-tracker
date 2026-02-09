@@ -559,7 +559,6 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             button_frame,
             text="Update Available!",
             command=self._start_app_update,
-            width=140,
             height=35,
             fg_color="#4CAF50",
             hover_color="#45a049",
