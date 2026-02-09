@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for changelog generation
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -50,6 +52,30 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Create/update rolling release on main branch push
+      - name: Get previous release commit
+        if: github.ref == 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
+        id: prev_release
+        run: |
+          # Get the commit SHA of the 'latest' tag (previous release)
+          $prevSha = git rev-list -n 1 latest 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            # No previous release, use first commit
+            $prevSha = git rev-list --max-parents=0 HEAD
+          }
+          echo "SHA=$prevSha" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
+      - name: Generate Changelog
+        if: github.ref == 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
+        id: changelog
+        run: |
+          $prevSha = "${{ steps.prev_release.outputs.SHA }}"
+          $changelog = git log --pretty=format:"- %s" "$prevSha..HEAD"
+          echo "CHANGELOG<<EOF" >> $env:GITHUB_OUTPUT
+          echo $changelog >> $env:GITHUB_OUTPUT
+          echo "EOF" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
       - name: Update Latest Release
         if: github.ref == 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
@@ -61,6 +87,10 @@ jobs:
           body: |
             Automated build from the latest commit on main branch.
 
+            ## Changes since last release
+            ${{ steps.changelog.outputs.CHANGELOG }}
+
+            ---
             **Commit:** ${{ github.sha }}
             **Date:** ${{ github.event.head_commit.timestamp }}
         env:
