@@ -227,7 +227,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.TkdndVersion = TkinterDnD._require(self)
 
         # Window configuration
-        self.title("Gorgon Tracker")
+        self.title(f"Gorgon Tracker - v{__version__}")
         self.geometry("1050x650")
         self.minsize(700, 500)
 
@@ -267,6 +267,8 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # App update state
         self._pending_update = None  # Stores update info when available
+        self._last_app_update_check = 0  # Timestamp of last update check
+        self._app_update_check_interval = 3600  # Check for updates every hour (seconds)
 
         # Current left tab selection
         self.current_left_tab = "Creatures"
@@ -308,6 +310,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # Check for application updates after 5 seconds
         self.after(5000, self._check_for_app_updates)
+        # Initialize the timestamp so periodic checks don't fire immediately
+        import time
+        self._last_app_update_check = time.time()
 
     def _load_settings(self):
         """Load GUI settings from file, migrating from legacy location if needed."""
@@ -2438,6 +2443,8 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 # Only run if not already parsing
                 if self.update_button.cget("state") != "disabled":
                     self._run_update()
+                # Check for app updates periodically (every hour)
+                self._maybe_check_app_updates()
                 # Schedule next run and reset countdown
                 self.auto_update_start_time = time.time()
                 self.auto_update_job = self.after(
@@ -3428,6 +3435,14 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         thread = threading.Thread(target=check, daemon=True)
         thread.start()
+
+    def _maybe_check_app_updates(self):
+        """Check for app updates if enough time has passed since last check."""
+        import time
+        now = time.time()
+        if now - self._last_app_update_check >= self._app_update_check_interval:
+            self._last_app_update_check = now
+            self._check_for_app_updates()
 
     def _show_update_button(self):
         """Show the update available button (called from main thread)."""
