@@ -275,24 +275,83 @@ class LootParser:
         except Exception as e:
             print(f"Warning: Could not mirror {source_path.name}: {e}")
 
-    def _mirror_player_log(self):
-        """Mirror only zone transition lines from Player.log."""
+    def _update_zone_history(self):
+        """Append new zone transitions from Player.log to persistent history."""
         if not self.player_log_path.exists():
             return
 
-        dest_path = self.mirror_dir / "Player.log"
+        history_file = self.storage_dir / "zone_history.txt"
 
+        # Load existing history to avoid duplicates
+        existing_entries = set()
+        if history_file.exists():
+            try:
+                with open(history_file, 'r', encoding='utf-8') as f:
+                    existing_entries = set(line.strip() for line in f if line.strip())
+            except Exception:
+                pass
+
+        # Get today's date for new entries
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        # Read current Player.log and append new entries
+        new_entries = []
         try:
             with open(self.player_log_path, 'r', encoding='utf-8', errors='replace') as f:
-                zone_lines = [line for line in f if self.PLAYER_LOG_ZONE_PATTERN.match(line.strip())]
-
-            with open(dest_path, 'w', encoding='utf-8') as f:
-                f.writelines(zone_lines)
+                for line in f:
+                    match = self.PLAYER_LOG_ZONE_PATTERN.match(line.strip())
+                    if match:
+                        time_str, zone_internal = match.groups()
+                        zone_name = ZONE_NAMES.get(zone_internal, zone_internal)
+                        if zone_name is None:  # Skip non-zones like ChooseCharacter
+                            continue
+                        entry = f"{today} {time_str} {zone_name}"
+                        if entry not in existing_entries:
+                            new_entries.append(entry)
+                            existing_entries.add(entry)
         except Exception as e:
-            print(f"Warning: Could not mirror Player.log: {e}")
+            print(f"Warning: Could not read Player.log: {e}")
+            return
+
+        # Append new entries to history
+        if new_entries:
+            try:
+                with open(history_file, 'a', encoding='utf-8') as f:
+                    for entry in new_entries:
+                        f.write(entry + '\n')
+            except Exception as e:
+                print(f"Warning: Could not write zone history: {e}")
+
+    def _load_zone_history(self) -> list[tuple[datetime, str]]:
+        """Load all zone transitions from persistent history."""
+        transitions = []
+        history_file = self.storage_dir / "zone_history.txt"
+
+        if not history_file.exists():
+            return transitions
+
+        try:
+            with open(history_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # Format: "2026-02-07 14:30:45 Kur Mountains"
+                    parts = line.split(' ', 2)  # Split into date, time, zone
+                    if len(parts) == 3:
+                        date_str, time_str, zone_name = parts
+                        try:
+                            dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+                            transitions.append((dt, zone_name))
+                        except ValueError:
+                            continue
+        except Exception:
+            pass
+
+        return sorted(transitions, key=lambda x: x[0])
 
     def _mirror_all_logs(self):
-        """Mirror all Chat-*.log files and Player.log to PlayerLogs directory."""
+        """Mirror all Chat-*.log files and update zone history."""
         if not self.chatlog_dir.exists():
             return
 
@@ -300,8 +359,8 @@ class LootParser:
         for log_file in self.chatlog_dir.glob("Chat-*.log"):
             self._mirror_log_file(log_file)
 
-        # Mirror Player.log (only zone transitions)
-        self._mirror_player_log()
+        # Update zone history (appends new transitions)
+        self._update_zone_history()
 
     def _load_creature_data(self) -> dict:
         """
@@ -717,24 +776,10 @@ class LootParser:
         # Check if this is today's log (current session - zone tracking is valid)
         self._is_current_session = self._is_today(file_name)
 
-        # Extract date from filename (Chat-YY-MM-DD.log)
-        try:
-            date_match = re.search(r'Chat-(\d{2})-(\d{2})-(\d{2})\.log', file_name)
-            if date_match:
-                year = 2000 + int(date_match.group(1))
-                month = int(date_match.group(2))
-                day = int(date_match.group(3))
-                reference_date = datetime(year, month, day)
-
-                # Only parse Player.log for zone transitions if current session
-                if self._is_current_session:
-                    self.zone_transitions = self._parse_player_log(reference_date)
-                    if callback and self.zone_transitions:
-                        callback(f"  Found {len(self.zone_transitions)} zone transitions in Player.log")
-                else:
-                    self.zone_transitions = []
-        except (ValueError, AttributeError):
-            self.zone_transitions = []
+        # Load zone transitions from persistent history
+        self.zone_transitions = self._load_zone_history()
+        if callback and self.zone_transitions:
+            callback(f"  Found {len(self.zone_transitions)} zone transitions in history")
 
         # Get last processed line for this file
         last_line = self.processed_state["files"].get(file_name, 0)
@@ -833,8 +878,8 @@ class LootParser:
         self._save_creature_data()
         self._generate_wiki_files()
 
-        # Mirror Player.log (only zone transitions) to keep it up to date
-        self._mirror_player_log()
+        # Update zone history (appends new transitions)
+        self._update_zone_history()
 
         return results
 
@@ -926,21 +971,8 @@ class LootParser:
             # Check if this is today's log (current session - zone tracking is valid)
             is_current_session = self._is_today(log_file.name)
 
-            # Extract date from filename
-            try:
-                date_match = re.search(r'Chat-(\d{2})-(\d{2})-(\d{2})\.log', log_file.name)
-                if date_match:
-                    year = 2000 + int(date_match.group(1))
-                    month = int(date_match.group(2))
-                    day = int(date_match.group(3))
-                    reference_date = datetime(year, month, day)
-                    # Only use Player.log zone data for current session
-                    if is_current_session:
-                        self.zone_transitions = self._parse_player_log(reference_date)
-                    else:
-                        self.zone_transitions = []
-            except (ValueError, AttributeError):
-                self.zone_transitions = []
+            # Load zone transitions from persistent history
+            self.zone_transitions = self._load_zone_history()
 
             # Reset state for this file
             current_creature = None
@@ -970,13 +1002,12 @@ class LootParser:
                     # Parse timestamp to UTC for comparison
                     current_utc_timestamp = self._parse_log_timestamp_utc(timestamp_str)
 
-                    # Parse timestamp for zone lookup (only valid for current session)
-                    if is_current_session:
-                        try:
-                            timestamp = datetime.strptime(timestamp_str, "%y-%m-%d %H:%M:%S")
-                            current_zone = self._get_zone_at_time(timestamp)
-                        except ValueError:
-                            pass
+                    # Parse timestamp for zone lookup (works for all logs now)
+                    try:
+                        timestamp = datetime.strptime(timestamp_str, "%y-%m-%d %H:%M:%S")
+                        current_zone = self._get_zone_at_time(timestamp)
+                    except ValueError:
+                        pass
 
                     # Parse timestamp for loot window checking
                     current_timestamp = None
@@ -1034,6 +1065,20 @@ class LootParser:
                                     zones.append(current_zone)
                                     zones.sort()
                                     self.creature_data[current_creature]["zones"] = zones
+
+                            # Zone self-healing: fix incorrect zone assignments
+                            if current_zone and current_creature in self.creature_data:
+                                creature_zones = self.creature_data[current_creature].get("zones", [])
+                                # If creature has zones but current_zone is not in them, it's a mismatch
+                                # We replace with the correct zone from Player.log
+                                if creature_zones and current_zone not in creature_zones:
+                                    if callback:
+                                        callback(f"  [ZONE FIX] {current_creature}: {creature_zones} -> [{current_zone}]")
+                                    self.creature_data[current_creature]["zones"] = [current_zone]
+                                    # Also fix item zones
+                                    for item_name, item_data in self.creature_data[current_creature].get("items", {}).items():
+                                        if item_data.get("zones"):
+                                            item_data["zones"] = [current_zone]
 
                     elif channel == "Status":
                         # Skinning/butchering XP - retrospectively classify last loot
