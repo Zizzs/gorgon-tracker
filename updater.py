@@ -149,33 +149,55 @@ set "INSTALL_DIR={install_dir_str}"
 set "NEW_VERSION={new_version_str}"
 set "BACKUP_DIR={backup_dir_str}"
 
-:: Wait for the application to exit with retry loop
-echo Waiting for application to close...
-set RETRY_COUNT=0
+:: Give the app a moment to start closing
+timeout /t 1 /nobreak >nul
 
-:WAIT_LOOP
+:: Force kill the application if still running
+echo Ensuring application is closed...
+taskkill /f /im GorgonTracker.exe >nul 2>&1
+
+:: Wait a moment for Windows to release file handles
 timeout /t 2 /nobreak >nul
-set /a RETRY_COUNT+=1
 
 :: Clean up any existing backup first
 if exist "%BACKUP_DIR%" rmdir /s /q "%BACKUP_DIR%" 2>nul
 
-:: Try to create backup (this tests if files are released)
-move "%INSTALL_DIR%" "%BACKUP_DIR%" >nul 2>&1
+:: Try to rename the install directory (tests if files are released)
+echo Creating backup...
+set RETRY_COUNT=0
 
+:WAIT_LOOP
+move "%INSTALL_DIR%" "%BACKUP_DIR%" >nul 2>&1
 if %ERRORLEVEL% equ 0 goto BACKUP_SUCCESS
 
-:: If still failing after 15 attempts (~30 seconds), give up
-if %RETRY_COUNT% geq 15 (
-    echo.
-    echo Failed to create backup after multiple attempts!
-    echo The application may still be running.
-    pause
-    exit /b 1
-)
+set /a RETRY_COUNT+=1
+
+:: If still failing after 10 attempts, try file-by-file copy approach
+if %RETRY_COUNT% geq 10 goto TRY_COPY_METHOD
 
 echo Attempt %RETRY_COUNT%: Waiting for files to be released...
+timeout /t 1 /nobreak >nul
 goto WAIT_LOOP
+
+:TRY_COPY_METHOD
+echo Move failed, trying file-by-file update...
+
+:: Use robocopy to mirror the new version over the old one
+:: /MIR mirrors the directory, /W:1 /R:3 sets retries
+robocopy "%NEW_VERSION%" "%INSTALL_DIR%" /MIR /W:1 /R:3 /NFL /NDL /NJH /NJS >nul 2>&1
+
+:: Robocopy returns various codes, less than 8 is success
+if %ERRORLEVEL% lss 8 goto INSTALL_SUCCESS_ROBOCOPY
+
+echo.
+echo Failed to update after multiple attempts!
+echo Please close any programs using GorgonTracker files and try again.
+pause
+exit /b 1
+
+:INSTALL_SUCCESS_ROBOCOPY
+echo Update installed via robocopy.
+goto CLEANUP
 
 :BACKUP_SUCCESS
 echo Backup created successfully.
@@ -195,10 +217,10 @@ if %ERRORLEVEL% neq 0 (
 
 :: Check if update succeeded
 if exist "%INSTALL_DIR%\\GorgonTracker.exe" (
-    :: Success - remove backup and start app
-    echo Update successful! Starting GorgonTracker...
+    :: Success - remove backup
+    echo Update successful!
     rmdir /s /q "%BACKUP_DIR%" 2>nul
-    start "" "%INSTALL_DIR%\\GorgonTracker.exe"
+    goto CLEANUP
 ) else (
     :: Failed - restore backup
     echo Update verification failed! Restoring backup...
@@ -210,10 +232,15 @@ if exist "%INSTALL_DIR%\\GorgonTracker.exe" (
     exit /b 1
 )
 
+:CLEANUP
 :: Clean up temp files
 echo Cleaning up...
 del "{zip_path_str}" 2>nul
 rmdir /s /q "{parent_dir_str}" 2>nul
+
+:: Start the updated application
+echo Starting GorgonTracker...
+start "" "%INSTALL_DIR%\\GorgonTracker.exe"
 
 :: Self-delete this script
 del "%~f0"
