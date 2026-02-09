@@ -133,11 +133,11 @@ def generate_update_script(new_version_path: Path, install_dir: Path) -> Path:
     # Convert paths to strings for batch script
     install_dir_str = str(install_dir)
     new_version_str = str(new_version_path)
-    backup_dir_str = str(install_dir) + ".backup"
     zip_path_str = str(temp_dir / ASSET_NAME)
     parent_dir_str = str(new_version_path.parent)
 
-    # Batch script content
+    # Batch script content - uses robocopy which handles locked files well
+    # (e.g., when Windows Defender is scanning the new files)
     script = f'''@echo off
 setlocal
 
@@ -147,7 +147,6 @@ echo.
 :: Define paths
 set "INSTALL_DIR={install_dir_str}"
 set "NEW_VERSION={new_version_str}"
-set "BACKUP_DIR={backup_dir_str}"
 
 :: Give the app a moment to start closing
 timeout /t 1 /nobreak >nul
@@ -159,80 +158,32 @@ taskkill /f /im GorgonTracker.exe >nul 2>&1
 :: Wait a moment for Windows to release file handles
 timeout /t 2 /nobreak >nul
 
-:: Clean up any existing backup first
-if exist "%BACKUP_DIR%" rmdir /s /q "%BACKUP_DIR%" 2>nul
-
-:: Try to rename the install directory (tests if files are released)
-echo Creating backup...
-set RETRY_COUNT=0
-
-:WAIT_LOOP
-move "%INSTALL_DIR%" "%BACKUP_DIR%" >nul 2>&1
-if %ERRORLEVEL% equ 0 goto BACKUP_SUCCESS
-
-set /a RETRY_COUNT+=1
-
-:: If still failing after 10 attempts, try file-by-file copy approach
-if %RETRY_COUNT% geq 10 goto TRY_COPY_METHOD
-
-echo Attempt %RETRY_COUNT%: Waiting for files to be released...
-timeout /t 1 /nobreak >nul
-goto WAIT_LOOP
-
-:TRY_COPY_METHOD
-echo Move failed, trying file-by-file update...
-
 :: Use robocopy to mirror the new version over the old one
-:: /MIR mirrors the directory, /W:1 /R:3 sets retries
-robocopy "%NEW_VERSION%" "%INSTALL_DIR%" /MIR /W:1 /R:3 /NFL /NDL /NJH /NJS >nul 2>&1
+:: /MIR mirrors the directory (copies new, deletes old)
+:: /W:2 wait 2 seconds between retries, /R:5 retry 5 times per file
+:: This handles antivirus scans and other temporary file locks gracefully
+echo Installing update...
+robocopy "%NEW_VERSION%" "%INSTALL_DIR%" /MIR /W:2 /R:5 /NFL /NDL /NJH /NJS
 
 :: Robocopy returns various codes, less than 8 is success
-if %ERRORLEVEL% lss 8 goto INSTALL_SUCCESS_ROBOCOPY
+if %ERRORLEVEL% lss 8 goto SUCCESS
 
 echo.
-echo Failed to update after multiple attempts!
+echo Failed to update! Error code: %ERRORLEVEL%
 echo Please close any programs using GorgonTracker files and try again.
 pause
 exit /b 1
 
-:INSTALL_SUCCESS_ROBOCOPY
-echo Update installed via robocopy.
-goto CLEANUP
-
-:BACKUP_SUCCESS
-echo Backup created successfully.
-
-:: Move new version into place
-echo Installing new version...
-move "%NEW_VERSION%" "%INSTALL_DIR%"
-
-if %ERRORLEVEL% neq 0 (
-    echo Failed to install new version! Restoring backup...
-    if exist "%BACKUP_DIR%" (
-        move "%BACKUP_DIR%" "%INSTALL_DIR%"
-    )
+:SUCCESS
+:: Verify the update
+if not exist "%INSTALL_DIR%\\GorgonTracker.exe" (
+    echo Update verification failed - GorgonTracker.exe not found!
     pause
     exit /b 1
 )
 
-:: Check if update succeeded
-if exist "%INSTALL_DIR%\\GorgonTracker.exe" (
-    :: Success - remove backup
-    echo Update successful!
-    rmdir /s /q "%BACKUP_DIR%" 2>nul
-    goto CLEANUP
-) else (
-    :: Failed - restore backup
-    echo Update verification failed! Restoring backup...
-    if exist "%BACKUP_DIR%" (
-        move "%BACKUP_DIR%" "%INSTALL_DIR%"
-    )
-    echo Update failed! Restored previous version.
-    pause
-    exit /b 1
-)
+echo Update successful!
 
-:CLEANUP
 :: Clean up temp files
 echo Cleaning up...
 del "{zip_path_str}" 2>nul
