@@ -830,6 +830,10 @@ class LootParser:
                 callback(f"Error: Chat log directory not found: {self.chatlog_dir}")
             return results
 
+        # Capture zone transitions FIRST, before processing any logs
+        # This prevents data loss if Player.log gets overwritten between sessions
+        self._update_zone_history()
+
         log_files = sorted(self.chatlog_dir.glob("Chat-*.log"))
 
         if not log_files:
@@ -960,6 +964,10 @@ class LootParser:
         """
         if not self.chatlog_dir.exists():
             return {}
+
+        # Capture zone transitions FIRST, before processing any logs
+        # This prevents data loss if Player.log gets overwritten between sessions
+        self._update_zone_history()
 
         log_files = sorted(self.chatlog_dir.glob("Chat-*.log"))
         stats = {"new_creatures": 0, "new_items": 0, "new_skinning": 0, "new_butchering": 0, "skipped_old": 0}
