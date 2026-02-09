@@ -3,8 +3,6 @@ name: Build and Release
 on:
   push:
     branches: [main]
-    tags:
-      - 'v*'
 
 permissions:
   contents: write
@@ -17,7 +15,37 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Full history for changelog generation
+          fetch-depth: 0  # Full history for tags and changelog
+
+      - name: Get latest version and increment
+        id: version
+        run: |
+          # Get the latest version tag
+          $latestTag = git describe --tags --abbrev=0 2>$null
+          if ($LASTEXITCODE -ne 0 -or -not $latestTag) {
+            $latestTag = "v0.0.0"
+          }
+          Write-Host "Latest tag: $latestTag"
+
+          # Parse version (v1.2.3 -> 1, 2, 3)
+          $version = $latestTag.TrimStart('v')
+          $parts = $version.Split('.')
+          $major = [int]$parts[0]
+          $minor = [int]$parts[1]
+          $patch = [int]$parts[2]
+
+          # Increment patch version
+          $patch++
+          $newVersion = "$major.$minor.$patch"
+          $newTag = "v$newVersion"
+
+          Write-Host "New version: $newVersion"
+          Write-Host "New tag: $newTag"
+
+          echo "VERSION=$newVersion" >> $env:GITHUB_OUTPUT
+          echo "TAG=$newTag" >> $env:GITHUB_OUTPUT
+          echo "PREV_TAG=$latestTag" >> $env:GITHUB_OUTPUT
+        shell: pwsh
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,11 +57,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Inject version from git tag
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Inject version into gui.py
         run: |
-          $tag = "${{ github.ref_name }}"
-          $version = $tag.TrimStart('v')
+          $version = "${{ steps.version.outputs.VERSION }}"
           Write-Host "Setting version to: $version"
           $content = Get-Content gui.py -Raw
           $content = $content -replace '__version__ = "[^"]*"', "__version__ = `"$version`""
@@ -52,57 +78,31 @@ jobs:
           name: GorgonTracker-windows
           path: GorgonTracker-windows.zip
 
-      # Create release on tag push (v*)
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: GorgonTracker-windows.zip
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Create/update rolling release on main branch push
-      - name: Get previous release commit
-        if: github.ref == 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
-        id: prev_release
-        run: |
-          # Get the commit SHA of the 'latest' tag (previous release)
-          $prevSha = git rev-list -n 1 latest 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            # No previous release, use first commit
-            $prevSha = git rev-list --max-parents=0 HEAD
-          }
-          echo "SHA=$prevSha" >> $env:GITHUB_OUTPUT
-        shell: pwsh
-
       - name: Generate Changelog
-        if: github.ref == 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
         id: changelog
         run: |
-          $prevSha = "${{ steps.prev_release.outputs.SHA }}"
-          $changelog = git log --pretty=format:"- %s" "$prevSha..HEAD"
+          $prevTag = "${{ steps.version.outputs.PREV_TAG }}"
+          Write-Host "Generating changelog from $prevTag to HEAD"
+          $changelog = git log --pretty=format:"- %s" "$prevTag..HEAD" 2>$null
+          if (-not $changelog) {
+            $changelog = "- Initial release"
+          }
           echo "CHANGELOG<<EOF" >> $env:GITHUB_OUTPUT
           echo $changelog >> $env:GITHUB_OUTPUT
           echo "EOF" >> $env:GITHUB_OUTPUT
         shell: pwsh
 
-      - name: Update Latest Release
-        if: github.ref == 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
+      - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: latest
-          name: Latest Build
+          tag_name: ${{ steps.version.outputs.TAG }}
+          name: GorgonTracker ${{ steps.version.outputs.TAG }}
           files: GorgonTracker-windows.zip
-          prerelease: true
           body: |
-            Automated build from the latest commit on main branch.
-
-            ## Changes since last release
+            ## Changes in this release
             ${{ steps.changelog.outputs.CHANGELOG }}
 
             ---
-            **Commit:** ${{ github.sha }}
-            **Date:** ${{ github.event.head_commit.timestamp }}
+            **Full Changelog:** https://github.com/${{ github.repository }}/compare/${{ steps.version.outputs.PREV_TAG }}...${{ steps.version.outputs.TAG }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
