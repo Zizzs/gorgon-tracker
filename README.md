@@ -1,8 +1,38 @@
 # Gorgon Tracker
 
-A desktop application for tracking loot drops, quests, and character data in [Project Gorgon](https://projectgorgon.com/).
+A desktop tool for **contributing loot data to the Project Gorgon Wiki**. Automatically parses your chat logs to track creature kills and drops, then generates wiki-formatted tables that integrate seamlessly with existing wiki pages.
 
-## Features
+## Main Feature: Wiki Synchronization
+
+The wiki sync system helps you contribute loot data to the [Project Gorgon Wiki](https://wiki.projectgorgon.com/). It's not just an export tool - it's a full bidirectional sync workflow.
+
+### How Wiki Sync Works
+
+1. **Generate Wiki Table** - Select a creature and click "Copy Wiki" to get a wiki-formatted loot table with:
+   - Zone-aware sections (items organized by zone)
+   - Skinning and Butchering results in separate sections
+   - Proper wiki syntax with item links
+
+2. **Paste Existing Wiki Content** - If the creature already has a wiki page with loot data:
+   - Click "Paste Wiki"
+   - Paste the existing wiki table content
+   - The parser extracts all currently-listed items
+
+3. **Merge Data** - Click "Merge" to combine:
+   - Your tracked drops are added to the wiki data
+   - Existing wiki items are preserved
+   - Duplicates are automatically handled
+
+4. **Copy Updated Table** - The merged result is ready to paste back into the wiki, preserving the original formatting while adding your new discoveries.
+
+### Wiki Sync Features
+
+- **Content validation** - Verifies pasted content matches the selected creature
+- **Zone sections** - Groups items by the zone where they dropped
+- **Color-coded status** - Visual feedback during the sync process
+- **Preserved formatting** - Respects existing wiki table structure
+
+## Additional Features
 
 ### Loot Tracking
 - **Automatic parsing** of chat logs to track creature kills and loot drops
@@ -24,22 +54,51 @@ A desktop application for tracking loot drops, quests, and character data in [Pr
 ### Character & Storage
 - **Character tab** - view your character's skills and levels
 - **Storage tab** - searchable inventory across all vault locations
-- **Rarity color coding** for items
+- **Rarity color coding** - items colored by rarity (Common/Uncommon/Rare/Epic/Legendary)
 
-### Export & Stats
-- **Export loot data** to wiki-formatted tables
-- **Session statistics** - total kills, drops, and loot rates
+### Stats Panel
+- Total creatures tracked, kills, and unique items
+- Skinning and butchering items counted separately
+- Most killed creature and rarest drops
+- Session statistics for loot rates
+
+### Auto-Parser
+- **Configurable automatic log parsing** (default every 60 seconds)
+- **Countdown display** showing time until next automatic update
+- **Manual update button** for immediate parsing
+- **Full rescan option** to reprocess all log data
+
+### Self-Update System
+- **Automatic version checking** against GitHub releases on startup
+- **In-app download** with progress display
+- **Automatic installation** and restart when updates are available
+- Never miss new features or bug fixes
+
+### Drag & Drop Import
+- Import `.gtdb` database files by dragging onto the window
+- Merge imported data with your local database
+- Share loot data between users
+
+### Developer Options
+- **Debug logging** for verbose parsing output
+- **Zone editing unlock** to modify zone assignments
+- **Item cache debugging** for troubleshooting
+
+### Color-Coded Display
+- **Item rarity colors** - Common, Uncommon, Rare, Epic, Legendary
+- **NPC favor level colors** - visual indicators for reputation tiers
+- **Quest status colors** - ready, incomplete, and in-progress states
 
 ## How It Works
 
 Gorgon Tracker reads the game's chat log files and character data:
 
-1. **Chat Logs** - Located in `Documents/Project Gorgon/ChatLogs/`
+1. **Chat Logs** - Located in `%LOCALAPPDATA%Low\Elder Game\Project Gorgon\ChatLogs\`
    - Parses `Chat-YY-MM-DD.log` files for combat and loot events
    - Detects kills via `(FATALITY!)` messages
    - Tracks loot via `{Item} added to inventory` messages
 
-2. **Player.log** - Located in `Documents/Project Gorgon/`
+2. **Player.log** - Located in `%LOCALAPPDATA%Low\Elder Game\Project Gorgon\`
    - Reads zone transitions to track your current location
 
 3. **Character Reports** - JSON files containing character data
@@ -99,12 +158,19 @@ The executable will be created at `dist/GorgonTracker/GorgonTracker.exe`.
 
 ## Usage
 
+### Basic Workflow
 1. **Launch the application**
 2. **Select your character** from the dropdown (auto-detected from game files)
 3. **Choose a log file** or use the current day's log
 4. **View loot data** - creatures appear in the left panel, click to see their drops
 5. **Check quests** - switch to Quests tab to see active quests and completion status
-6. **Export data** - use Options panel to export loot tables for the wiki
+
+### Wiki Contribution Workflow
+1. **Play the game** and kill creatures as normal
+2. **Open Gorgon Tracker** and parse your logs
+3. **Select a creature** you want to add loot data for
+4. **Copy Wiki** to generate the wiki-formatted table
+5. **Edit the wiki page** and paste your new data (or use Paste Wiki + Merge to update existing pages)
 
 ## Project Structure
 
