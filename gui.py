@@ -29,6 +29,193 @@ VALID_ZONES = sorted(set(name for name in ZONE_NAMES.values() if name is not Non
 SETTINGS_FILE = get_gorgon_tracker_data_dir() / "gui_settings.json"
 
 
+class ZoneEditorDialog(ctk.CTkToplevel):
+    """Dialog for editing creature zones."""
+
+    def __init__(self, parent, creature_name: str, parser, data_lock):
+        super().__init__(parent)
+        self.creature_name = creature_name
+        self.parser = parser
+        self.data_lock = data_lock
+
+        # Get current zones from creature data
+        with self.data_lock:
+            creature_data = self.parser.creature_data.get(creature_name, {})
+            self.zones = list(creature_data.get("zones", []))
+
+        # Window setup
+        self.title(f"Edit Zones - {creature_name}")
+        self.geometry("350x500")
+        self.resizable(False, False)
+
+        # Center on parent
+        self.transient(parent)
+        self.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() - 350) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - 500) // 2
+        self.geometry(f"+{x}+{y}")
+
+        self._create_ui()
+
+    def _create_ui(self):
+        """Create the dialog UI."""
+        # Main container
+        main_frame = ctk.CTkFrame(self, fg_color="transparent")
+        main_frame.pack(fill="both", expand=True, padx=15, pady=15)
+
+        # Title
+        title_label = ctk.CTkLabel(
+            main_frame,
+            text="Current Zones",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        title_label.pack(anchor="w", pady=(0, 10))
+
+        # Scrollable zone list
+        self.zone_list_frame = ctk.CTkScrollableFrame(main_frame, height=180)
+        self.zone_list_frame.pack(fill="x", pady=(0, 15))
+
+        self._refresh_zone_list()
+
+        # Add zone section
+        add_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        add_frame.pack(fill="x", pady=(0, 15))
+
+        add_label = ctk.CTkLabel(
+            add_frame,
+            text="Add Zone:",
+            font=ctk.CTkFont(size=12)
+        )
+        add_label.pack(anchor="w", pady=(0, 5))
+
+        # Dropdown and Add button row
+        add_row = ctk.CTkFrame(add_frame, fg_color="transparent")
+        add_row.pack(fill="x")
+
+        self.zone_dropdown = ctk.CTkOptionMenu(
+            add_row,
+            values=VALID_ZONES,
+            width=200,
+            height=28
+        )
+        self.zone_dropdown.pack(side="left")
+
+        add_button = ctk.CTkButton(
+            add_row,
+            text="Add",
+            width=60,
+            height=28,
+            command=self._add_zone
+        )
+        add_button.pack(side="left", padx=(10, 0))
+
+        # Sync all items button
+        sync_button = ctk.CTkButton(
+            main_frame,
+            text="Sync All Items to Zones",
+            width=200,
+            command=self._sync_all_items
+        )
+        sync_button.pack(pady=(15, 15))
+
+        # Close button
+        close_button = ctk.CTkButton(
+            main_frame,
+            text="Close",
+            width=100,
+            command=self.destroy
+        )
+        close_button.pack(side="bottom", pady=(10, 0))
+
+    def _refresh_zone_list(self):
+        """Refresh the zone list display."""
+        # Clear existing items
+        for widget in self.zone_list_frame.winfo_children():
+            widget.destroy()
+
+        if not self.zones:
+            empty_label = ctk.CTkLabel(
+                self.zone_list_frame,
+                text="No zones assigned",
+                text_color="gray"
+            )
+            empty_label.pack(pady=10)
+            return
+
+        for zone in self.zones:
+            zone_row = ctk.CTkFrame(self.zone_list_frame, fg_color="transparent")
+            zone_row.pack(fill="x", pady=2)
+
+            zone_label = ctk.CTkLabel(
+                zone_row,
+                text=zone,
+                font=ctk.CTkFont(size=12),
+                anchor="w"
+            )
+            zone_label.pack(side="left", fill="x", expand=True)
+
+            remove_button = ctk.CTkButton(
+                zone_row,
+                text="X",
+                width=28,
+                height=24,
+                fg_color="gray40",
+                hover_color="#c0392b",
+                command=lambda z=zone: self._remove_zone(z)
+            )
+            remove_button.pack(side="right")
+
+    def _add_zone(self):
+        """Add selected zone to the list and save immediately."""
+        zone = self.zone_dropdown.get()
+        if zone and zone not in self.zones:
+            self.zones.append(zone)
+            self.zones.sort()
+            self._refresh_zone_list()
+            # Save immediately
+            with self.data_lock:
+                if self.creature_name in self.parser.creature_data:
+                    self.parser.creature_data[self.creature_name]["zones"] = self.zones.copy()
+                    self.parser._save_creature_data()
+
+    def _remove_zone(self, zone: str):
+        """Remove zone from the list and save immediately."""
+        if zone in self.zones:
+            self.zones.remove(zone)
+            self._refresh_zone_list()
+            # Save immediately
+            with self.data_lock:
+                if self.creature_name in self.parser.creature_data:
+                    self.parser.creature_data[self.creature_name]["zones"] = self.zones.copy()
+                    self.parser._save_creature_data()
+
+    def _sync_all_items(self):
+        """Sync all items (loot, skinning, butchering) to match creature's zones."""
+        if not self.zones:
+            return
+
+        with self.data_lock:
+            if self.creature_name in self.parser.creature_data:
+                creature_data = self.parser.creature_data[self.creature_name]
+                zones_copy = self.zones.copy()
+
+                # Update all regular items
+                for item_data in creature_data.get("items", {}).values():
+                    item_data["zones"] = zones_copy.copy()
+
+                # Update all skinning items
+                for item_data in creature_data.get("skinning", {}).values():
+                    item_data["zones"] = zones_copy.copy()
+
+                # Update all butchering items
+                for item_data in creature_data.get("butchering", {}).values():
+                    item_data["zones"] = zones_copy.copy()
+
+                # Save
+                self.parser._save_creature_data()
+
+
+
 class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
     """Main application window for the loot uploader."""
 
@@ -92,6 +279,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # Thread synchronization for shared data
         self._data_lock = threading.Lock()
+        self._update_lock = threading.Lock()  # Protects update_in_progress flag
 
         # Load settings
         self._load_settings()
@@ -1286,9 +1474,13 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.detail_name.bind("<Enter>", lambda e: self.detail_name.configure(font=ctk.CTkFont(size=16, weight="bold", underline=True)))
         self.detail_name.bind("<Leave>", lambda e: self.detail_name.configure(font=ctk.CTkFont(size=16, weight="bold", underline=False)))
 
+        # Zone row frame (for zone link + edit button)
+        self.zone_row = ctk.CTkFrame(self.detail_header, fg_color="transparent")
+        # Don't pack yet - will be shown when creature selected
+
         # Clickable zone link
         self.zone_link = ctk.CTkLabel(
-            self.detail_header,
+            self.zone_row,
             text="",
             font=ctk.CTkFont(size=12),
             text_color="#4CAF50",
@@ -1297,6 +1489,16 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.zone_link.bind("<Button-1>", self._on_zone_click)
         self.zone_link.bind("<Enter>", lambda e: self.zone_link.configure(font=ctk.CTkFont(size=12, underline=True)))
         self.zone_link.bind("<Leave>", lambda e: self.zone_link.configure(font=ctk.CTkFont(size=12, underline=False)))
+
+        # Edit zones button
+        self.zone_edit_button = ctk.CTkButton(
+            self.zone_row,
+            text="Edit",
+            width=40,
+            height=20,
+            font=ctk.CTkFont(size=10),
+            command=self._open_zone_editor
+        )
 
         # Info row with zone and kills
         self.detail_info_frame = ctk.CTkFrame(self.detail_header, fg_color="transparent")
@@ -1981,6 +2183,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
                 # Clear detail view
                 self.detail_name.configure(text="Loot Details")
+                self.zone_row.pack_forget()
                 self.detail_info.configure(text="Select a creature to view loot")
                 for widget in self.loot_section.winfo_children():
                     widget.destroy()
@@ -2270,6 +2473,19 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         else:
             self.status_label.configure(text="Ready", text_color=("gray10", "gray90"))
 
+    def _disable_window(self):
+        """Disable all user input on the window during updates."""
+        self.attributes('-disabled', True)
+        self.update_button.configure(state="disabled", text="Updating...")
+        self.full_rescan_button.configure(state="disabled")
+        self.status_label.configure(text="Processing...")
+
+    def _enable_window(self):
+        """Re-enable user input after update completes."""
+        self.attributes('-disabled', False)
+        self.update_button.configure(state="normal", text="Update")
+        self.full_rescan_button.configure(state="normal", text="Full Rescan")
+
     def _format_last_update(self) -> str:
         """Format the last update timestamp for display."""
         with self._data_lock:
@@ -2345,15 +2561,14 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         if self.parser is None:
             return
 
-        # Prevent overlapping updates
-        if self.update_in_progress:
-            return
-        self.update_in_progress = True
+        # Prevent overlapping updates (atomic check-and-set)
+        with self._update_lock:
+            if self.update_in_progress:
+                return
+            self.update_in_progress = True
 
-        # Disable buttons during parsing
-        self.update_button.configure(state="disabled", text="Updating...")
-        self.full_rescan_button.configure(state="disabled")
-        self.status_label.configure(text="Processing...")
+        # Disable entire window during update
+        self._disable_window()
 
         def parse_thread():
             try:
@@ -2383,11 +2598,11 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._log_message(f"Error: {str(e)}")
 
             finally:
-                # Re-enable buttons and refresh list
+                # Re-enable window and refresh list
                 def finish():
-                    self.update_in_progress = False
-                    self.update_button.configure(state="normal", text="Update")
-                    self.full_rescan_button.configure(state="normal")
+                    with self._update_lock:
+                        self.update_in_progress = False
+                    self._enable_window()
                     self._update_auto_status()
                     self._update_zone_label()
                     self._refresh_creature_list()
@@ -2403,15 +2618,15 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         if self.parser is None:
             return
 
-        # Prevent overlapping updates
-        if self.update_in_progress:
-            return
-        self.update_in_progress = True
+        # Prevent overlapping updates (atomic check-and-set)
+        with self._update_lock:
+            if self.update_in_progress:
+                return
+            self.update_in_progress = True
 
-        # Disable buttons during parsing
-        self.update_button.configure(state="disabled")
-        self.full_rescan_button.configure(state="disabled", text="Rescanning...")
-        self.status_label.configure(text="Processing...")
+        # Disable entire window during update
+        self._disable_window()
+        self.full_rescan_button.configure(text="Rescanning...")
 
         def rescan_thread():
             try:
@@ -2449,11 +2664,11 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._log_message(f"Error: {str(e)}")
 
             finally:
-                # Re-enable buttons and refresh list
+                # Re-enable window and refresh list
                 def finish():
-                    self.update_in_progress = False
-                    self.update_button.configure(state="normal")
-                    self.full_rescan_button.configure(state="normal", text="Full Rescan")
+                    with self._update_lock:
+                        self.update_in_progress = False
+                    self._enable_window()
                     self._update_auto_status()
                     self._update_zone_label()
                     self._refresh_creature_list()
@@ -2650,43 +2865,31 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             widget.pack_forget()
 
         # Build zone display
-        # Show zone dropdown if:
-        # 1. Creature has no zones, OR
-        # 2. Debug zone editing is enabled
-        if stats["zones"] and not self.debug_zone_editing:
-            # Zone is known and not in debug mode - show clickable zone link and kills separately
-            zone_name = stats["zones"][0]  # Primary zone
-            self.zone_link.configure(text=f"Zone: {zone_name}")
-            self.zone_link.pack(anchor="w")
-            self.detail_info.configure(text=f"Kills: {stats['kills']}", text_color=("gray30", "gray70"))
-            self.detail_info.pack(anchor="w")
-            self.detail_info_frame.pack_forget()
-        else:
-            self.zone_link.pack_forget()
-            # Zone unknown OR debug mode enabled - show dropdown
-            self.detail_info.pack_forget()
-            self.detail_info_frame.pack(anchor="w", pady=(5, 0))
+        # Always show zone row with all zones and Edit button
+        # Filter out "Unknown" from display if there are other zones
+        display_zones = [z for z in stats["zones"] if z != "Unknown"] if stats["zones"] else []
+        if not display_zones and stats["zones"]:
+            display_zones = stats["zones"]  # Keep "Unknown" if it's the only zone
 
-            zone_prefix = ctk.CTkLabel(
-                self.detail_info_frame,
-                text="Zone: ",
-                font=ctk.CTkFont(size=12),
-                text_color=("gray30", "gray70")
-            )
-            zone_prefix.pack(side="left")
+        # Show zone row with clickable zone link and Edit button
+        self.zone_row.pack_forget()  # Reset before repacking
+        self.zone_link.pack_forget()
+        self.zone_edit_button.pack_forget()
+        self.detail_info.pack_forget()
 
-            # Set dropdown to current zone if available, or "Unknown"
-            current_zone = stats["zones"][0] if stats["zones"] else "Unknown"
-            self.zone_dropdown.set(current_zone)
-            self.zone_dropdown.pack(side="left")
+        self.zone_row.pack(anchor="w")
+        zone_text = ", ".join(display_zones) if display_zones else "Unknown"
+        self.zone_link.configure(text=f"Zones: {zone_text}")
+        self.zone_link.pack(side="left")
+        if self.debug_zone_editing:
+            self.zone_edit_button.pack(side="left", padx=(8, 0))
 
-            kills_label = ctk.CTkLabel(
-                self.detail_info_frame,
-                text=f"  |  Kills: {stats['kills']}",
-                font=ctk.CTkFont(size=12),
-                text_color=("gray30", "gray70")
-            )
-            kills_label.pack(side="left")
+        # Show kills on separate line
+        self.detail_info.configure(text=f"Kills: {stats['kills']}", text_color=("gray30", "gray70"))
+        self.detail_info.pack(anchor="w")
+
+        # Hide the old dropdown frame (kept for backward compatibility if needed)
+        self.detail_info_frame.pack_forget()
 
         # Clear sections
         for widget in self.loot_section.winfo_children():
@@ -2696,12 +2899,43 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         for widget in self.butchering_section.winfo_children():
             widget.destroy()
 
-        # Populate loot section
-        self._populate_item_section(
-            self.loot_section,
-            "Loot Drops",
-            stats["items"]
-        )
+        # Categorize loot items by zone count:
+        # - Single-zone items (not Unknown) → zone-specific section
+        # - Multi-zone items or Unknown zone → General Loot
+        general_items = {}
+        zone_items = {}  # zone -> {item_name: item_data}
+
+        for item_name, item_data in stats["items"].items():
+            item_zones = item_data.get("zones", [])
+
+            if len(item_zones) != 1:
+                # Multi-zone or no zone → General Loot
+                general_items[item_name] = item_data
+            elif item_zones[0] == "Unknown":
+                # Unknown zone → General Loot
+                general_items[item_name] = item_data
+            else:
+                # Single zone (not Unknown) → zone-specific
+                zone = item_zones[0]
+                if zone not in zone_items:
+                    zone_items[zone] = {}
+                zone_items[zone][item_name] = item_data
+
+        # Display General Loot section first
+        if general_items:
+            self._populate_item_section(
+                self.loot_section,
+                "General Loot",
+                general_items
+            )
+
+        # Display zone-specific sections
+        for zone in sorted(zone_items.keys()):
+            self._populate_item_section(
+                self.loot_section,
+                f"{zone} Loot",
+                zone_items[zone]
+            )
 
         # Populate skinning section
         self._populate_item_section(
@@ -2734,10 +2968,12 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 creature_data["zones"].append(zone)
                 creature_data["zones"].sort()
 
-            # Also update all items that have no zone to use this zone
+            # Also update all items that have no zone or only "Unknown" zone
             items = creature_data.get("items", {})
             for item_name, item_data in items.items():
-                if not item_data.get("zones"):
+                item_zones = item_data.get("zones", [])
+                # Update items with no zones OR only "Unknown" zone
+                if not item_zones or item_zones == ["Unknown"]:
                     item_data["zones"] = [zone]
 
             # Save the data
@@ -2751,6 +2987,19 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._select_creature(self.selected_creature)
 
             self._log_message(f"Set zone for {self.selected_creature} to {zone}")
+
+    def _open_zone_editor(self):
+        """Open popup dialog to edit creature zones."""
+        if not self.selected_creature or not self.parser:
+            return
+
+        dialog = ZoneEditorDialog(self, self.selected_creature, self.parser, self._data_lock)
+        dialog.grab_set()  # Modal
+        self.wait_window(dialog)
+        # Refresh display after dialog closes
+        if self.selected_creature:
+            self._select_creature(self.selected_creature)
+            self._update_creature_list()
 
     def _clear_wiki_for_input(self):
         """Clear wiki textbox and show placeholder for user input."""
