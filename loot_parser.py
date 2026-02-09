@@ -378,19 +378,16 @@ class LootParser:
     def _get_zone_at_time(self, timestamp: datetime) -> Optional[str]:
         """Get the zone the player was in at a given timestamp.
 
-        Note: timestamp is in local time, zone_transitions are in UTC.
+        Both timestamp and zone_transitions are in local time.
         We compare full datetime objects to correctly handle midnight crossings.
         """
         if not self.zone_transitions:
             return None
 
-        # Convert local timestamp to full UTC datetime for comparison
-        utc_timestamp = timestamp - timedelta(hours=self._timezone_offset_hours)
-
         current_zone = None
 
         for zone_time, zone_name in self.zone_transitions:
-            if zone_time <= utc_timestamp:
+            if zone_time <= timestamp:
                 current_zone = zone_name
             else:
                 break

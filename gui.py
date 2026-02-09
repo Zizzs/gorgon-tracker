@@ -62,6 +62,13 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         # Search state
         self.search_var = ctk.StringVar()
         self.storage_search_var = ctk.StringVar()
+        self.search_debounce_job = None  # Debounce timer for search
+
+        # Update state
+        self.update_in_progress = False  # Prevent overlapping auto-updates
+
+        # Hover throttle state
+        self.last_hover_time = 0
 
         # Current left tab selection
         self.current_left_tab = "Creatures"
@@ -1190,6 +1197,13 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _on_quest_hover(self, event):
         """Handle mouse hover over quest items - show underline and hand cursor."""
+        import time
+        now = time.time()
+        # Throttle hover events to max ~20 per second
+        if now - self.last_hover_time < 0.05:
+            return
+        self.last_hover_time = now
+
         item_id = self.quests_tree.identify_row(event.y)
 
         # If hovering over same item, do nothing
@@ -1929,10 +1943,15 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         date_str = datetime.now().strftime("%Y-%m-%d")
         default_name = f"GorgonTrackerDatabase_{date_str}.gtdb"
 
+        # Start in user's Documents folder
+        import os
+        documents_folder = os.path.expanduser("~/Documents")
+
         file_path = filedialog.asksaveasfilename(
             defaultextension=".gtdb",
             filetypes=[("Gorgon Tracker Database", "*.gtdb"), ("All files", "*.*")],
             initialfile=default_name,
+            initialdir=documents_folder,
             title="Export Database"
         )
 
@@ -2146,6 +2165,10 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         def update():
             self.status_log.configure(state="normal")
             self.status_log.insert("end", message + "\n")
+            # Limit to 500 lines to prevent unbounded memory growth
+            lines = int(self.status_log.index('end-1c').split('.')[0])
+            if lines > 500:
+                self.status_log.delete("1.0", f"{lines - 500}.0")
             self.status_log.see("end")
             self.status_log.configure(state="disabled")
 
@@ -2155,6 +2178,11 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         """Run incremental update in a background thread."""
         if self.parser is None:
             return
+
+        # Prevent overlapping updates
+        if self.update_in_progress:
+            return
+        self.update_in_progress = True
 
         # Disable buttons during parsing
         self.update_button.configure(state="disabled", text="Updating...")
@@ -2191,6 +2219,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             finally:
                 # Re-enable buttons and refresh list
                 def finish():
+                    self.update_in_progress = False
                     self.update_button.configure(state="normal", text="Update")
                     self.full_rescan_button.configure(state="normal")
                     self._update_auto_status()
@@ -2207,6 +2236,11 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         """Run full rescan in a background thread."""
         if self.parser is None:
             return
+
+        # Prevent overlapping updates
+        if self.update_in_progress:
+            return
+        self.update_in_progress = True
 
         # Disable buttons during parsing
         self.update_button.configure(state="disabled")
@@ -2245,6 +2279,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             finally:
                 # Re-enable buttons and refresh list
                 def finish():
+                    self.update_in_progress = False
                     self.update_button.configure(state="normal")
                     self.full_rescan_button.configure(state="normal", text="Full Rescan")
                     self._update_auto_status()
@@ -2363,8 +2398,10 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.search_var.set("")
 
     def _on_search_changed(self, *args):
-        """Handle search text changes."""
-        self._refresh_creature_list()
+        """Handle search text changes with 300ms debounce."""
+        if self.search_debounce_job:
+            self.after_cancel(self.search_debounce_job)
+        self.search_debounce_job = self.after(300, self._refresh_creature_list)
 
     def _filter_creatures(self, creatures_by_zone: dict) -> dict:
         """
