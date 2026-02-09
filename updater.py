@@ -144,25 +144,41 @@ setlocal
 echo GorgonTracker Update in Progress...
 echo.
 
-:: Wait for the application to exit
-echo Waiting for application to close...
-timeout /t 3 /nobreak >nul
-
 :: Define paths
 set "INSTALL_DIR={install_dir_str}"
 set "NEW_VERSION={new_version_str}"
 set "BACKUP_DIR={backup_dir_str}"
 
-:: Create backup of current installation
-echo Creating backup...
-if exist "%BACKUP_DIR%" rmdir /s /q "%BACKUP_DIR%"
-move "%INSTALL_DIR%" "%BACKUP_DIR%"
+:: Wait for the application to exit with retry loop
+echo Waiting for application to close...
+set RETRY_COUNT=0
 
-if %ERRORLEVEL% neq 0 (
-    echo Failed to create backup!
+:WAIT_LOOP
+timeout /t 2 /nobreak >nul
+set /a RETRY_COUNT+=1
+
+:: Clean up any existing backup first
+if exist "%BACKUP_DIR%" rmdir /s /q "%BACKUP_DIR%" 2>nul
+
+:: Try to create backup (this tests if files are released)
+move "%INSTALL_DIR%" "%BACKUP_DIR%" >nul 2>&1
+
+if %ERRORLEVEL% equ 0 goto BACKUP_SUCCESS
+
+:: If still failing after 15 attempts (~30 seconds), give up
+if %RETRY_COUNT% geq 15 (
+    echo.
+    echo Failed to create backup after multiple attempts!
+    echo The application may still be running.
     pause
     exit /b 1
 )
+
+echo Attempt %RETRY_COUNT%: Waiting for files to be released...
+goto WAIT_LOOP
+
+:BACKUP_SUCCESS
+echo Backup created successfully.
 
 :: Move new version into place
 echo Installing new version...

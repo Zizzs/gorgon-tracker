@@ -3462,8 +3462,11 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             generate_update_script, launch_update_script, is_running_frozen
         )
 
-        # Disable the button and show progress
-        self.update_app_button.configure(state="disabled", text="Downloading...", text_color="black")
+        # Store original command for restoration on failure
+        self._original_update_command = self._start_app_update
+
+        # Keep button enabled but disable its action (avoids gray disabled text)
+        self.update_app_button.configure(command=lambda: None, text="Downloading...", text_color="black")
 
         # Disable the entire window to prevent any user interaction
         self._disable_window_for_update()
@@ -3543,9 +3546,10 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         # Re-enable window
         self._enable_window_after_update()
 
-        # Reset button state with error indication
+        # Restore original command and show error indication
+        original_cmd = getattr(self, '_original_update_command', self._start_app_update)
         self.update_app_button.configure(
-            state="normal",
+            command=original_cmd,
             text="Update Failed - Retry?",
             fg_color="#f44336",  # Red to indicate error
             text_color="white"
