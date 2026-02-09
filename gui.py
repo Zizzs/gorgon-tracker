@@ -23,7 +23,7 @@ from paths import get_gorgon_tracker_data_dir, get_pg_chatlog_dir
 from reports_parser import ReportsParser, FAVOR_DISPLAY, FAVOR_LEVELS
 
 # List of valid zone display names for dropdown
-VALID_ZONES = sorted([name for name in ZONE_NAMES.values() if name is not None])
+VALID_ZONES = sorted(set(name for name in ZONE_NAMES.values() if name is not None))
 
 # Settings file path - now stored in LocalLow/GorgonTracker
 SETTINGS_FILE = get_gorgon_tracker_data_dir() / "gui_settings.json"
@@ -58,6 +58,8 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.auto_update_interval = 60  # seconds
         self.auto_update_job = None
         self.last_update_timestamp = None  # ISO format string or None
+        self.debug_zone_editing = False  # Developer option for zone dropdown editing
+        self.debug_logging = False  # Developer option for showing debug logs
 
         # Search state
         self.search_var = ctk.StringVar()
@@ -66,6 +68,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # Update state
         self.update_in_progress = False  # Prevent overlapping auto-updates
+        self.last_manual_update_time = 0  # Timestamp of last manual update (for cooldown)
+        self.auto_update_start_time = 0  # When auto-update timer started (for countdown display)
+        self.countdown_job = None  # Timer job for updating countdown display
 
         # Hover throttle state
         self.last_hover_time = 0
@@ -119,6 +124,8 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     self.auto_update_enabled = settings.get("auto_update_enabled", False)
                     self.auto_update_interval = settings.get("auto_update_interval", 60)
                     self.last_update_timestamp = settings.get("last_update_timestamp", None)
+                    self.debug_zone_editing = settings.get("debug_zone_editing", False)
+                    self.debug_logging = settings.get("debug_logging", False)
             except (json.JSONDecodeError, IOError):
                 pass
 
@@ -147,7 +154,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         settings = {
             "auto_update_enabled": self.auto_update_enabled,
             "auto_update_interval": self.auto_update_interval,
-            "last_update_timestamp": self.last_update_timestamp
+            "last_update_timestamp": self.last_update_timestamp,
+            "debug_zone_editing": self.debug_zone_editing,
+            "debug_logging": self.debug_logging
         }
         try:
             with open(SETTINGS_FILE, 'w') as f:
@@ -273,7 +282,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.update_button = ctk.CTkButton(
             button_frame,
             text="Update",
-            command=self._run_update,
+            command=self._run_manual_update,
             width=100,
             height=35,
             font=ctk.CTkFont(size=14, weight="bold")
@@ -1751,6 +1760,87 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.clear_status.pack(side="left", padx=10)
 
+        # Zone History section
+        ctk.CTkLabel(
+            data_frame,
+            text="Clear zone history to force 'Unknown' zone on rescan",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", padx=15, pady=(0, 10))
+
+        zone_history_frame = ctk.CTkFrame(data_frame, fg_color="transparent")
+        zone_history_frame.pack(fill="x", padx=15, pady=(0, 15))
+
+        self.clear_zone_history_button = ctk.CTkButton(
+            zone_history_frame,
+            text="Clear Zone History",
+            command=self._clear_zone_history,
+            width=150,
+            height=32,
+            fg_color="#ff9800",
+            hover_color="#f57c00",
+            font=ctk.CTkFont(size=13)
+        )
+        self.clear_zone_history_button.pack(side="left")
+
+        self.zone_history_status = ctk.CTkLabel(
+            zone_history_frame,
+            text="",
+            font=ctk.CTkFont(size=11)
+        )
+        self.zone_history_status.pack(side="left", padx=10)
+
+        # Developer Options section
+        dev_frame = ctk.CTkFrame(self.options_scroll)
+        dev_frame.pack(fill="x", padx=10, pady=10)
+
+        ctk.CTkLabel(
+            dev_frame,
+            text="Developer Options",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", padx=15, pady=(15, 5))
+
+        ctk.CTkLabel(
+            dev_frame,
+            text="Advanced options for debugging and development",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", padx=15, pady=(0, 10))
+
+        self.debug_zone_var = ctk.BooleanVar(value=self.debug_zone_editing)
+        self.debug_zone_checkbox = ctk.CTkCheckBox(
+            dev_frame,
+            text="Enable zone editing for all creatures",
+            variable=self.debug_zone_var,
+            font=ctk.CTkFont(size=13),
+            command=self._on_debug_zone_changed
+        )
+        self.debug_zone_checkbox.pack(anchor="w", padx=15, pady=5)
+
+        ctk.CTkLabel(
+            dev_frame,
+            text="Shows zone dropdown even for creatures with assigned zones",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", padx=(39, 15), pady=(0, 10))
+
+        self.debug_logging_var = ctk.BooleanVar(value=self.debug_logging)
+        self.debug_logging_checkbox = ctk.CTkCheckBox(
+            dev_frame,
+            text="Enable debug logging",
+            variable=self.debug_logging_var,
+            font=ctk.CTkFont(size=13),
+            command=self._on_debug_logging_changed
+        )
+        self.debug_logging_checkbox.pack(anchor="w", padx=15, pady=5)
+
+        ctk.CTkLabel(
+            dev_frame,
+            text="Shows detailed debug information during rescans",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", padx=(39, 15), pady=(0, 15))
+
         # Save button
         save_frame = ctk.CTkFrame(self.options_scroll, fg_color="transparent")
         save_frame.pack(fill="x", padx=10, pady=15)
@@ -1813,10 +1903,23 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.showing_stats = True
         self.showing_options = False
 
+    def _on_debug_zone_changed(self):
+        """Handle debug zone editing toggle."""
+        self.debug_zone_editing = self.debug_zone_var.get()
+        # Refresh current creature display if one is selected
+        if self.selected_creature:
+            self._select_creature(self.selected_creature)
+
+    def _on_debug_logging_changed(self):
+        """Handle debug logging toggle."""
+        self.debug_logging = self.debug_logging_var.get()
+
     def _save_options(self):
         """Save options and apply changes."""
         # Get values
         self.auto_update_enabled = self.auto_update_var.get()
+        self.debug_zone_editing = self.debug_zone_var.get()
+        self.debug_logging = self.debug_logging_var.get()
 
         try:
             interval = int(self.interval_entry.get())
@@ -1896,6 +1999,32 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             except Exception as e:
                 self.clear_status.configure(text=f"Error: {str(e)}", text_color="#F44336")
                 self.after(3000, lambda: self.clear_status.configure(text=""))
+
+    def _clear_zone_history(self):
+        """Clear the zone history file."""
+        from tkinter import messagebox
+
+        result = messagebox.askyesno(
+            "Clear Zone History",
+            "Clear all zone transition history?\n\nAfter this, run Full Rescan to assign 'Unknown' zone to kills without same-day zone data.",
+            icon="warning"
+        )
+
+        if result:
+            try:
+                zone_history_file = self.parser.storage_dir / "zone_history.txt"
+                if zone_history_file.exists():
+                    zone_history_file.unlink()
+
+                # Also clear the in-memory zone transitions
+                self.parser.zone_transitions = []
+
+                self.zone_history_status.configure(text="Cleared!", text_color="#4CAF50")
+                self._log_message("Zone history cleared - run Full Rescan to rebuild")
+                self.after(3000, lambda: self.zone_history_status.configure(text=""))
+            except Exception as e:
+                self.zone_history_status.configure(text=f"Error: {e}", text_color="#F44336")
+                self.after(3000, lambda: self.zone_history_status.configure(text=""))
 
     def _browse_folder(self):
         """Open folder browser dialog."""
@@ -2075,6 +2204,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _start_auto_update(self):
         """Start the auto-update timer."""
+        import time
         self._stop_auto_update()  # Cancel any existing timer
 
         def auto_run():
@@ -2082,16 +2212,18 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 # Only run if not already parsing
                 if self.update_button.cget("state") != "disabled":
                     self._run_update()
-                # Schedule next run
+                # Schedule next run and reset countdown
+                self.auto_update_start_time = time.time()
                 self.auto_update_job = self.after(
                     self.auto_update_interval * 1000,
                     auto_run
                 )
 
-        # Start the timer
+        # Start the timer and track start time
+        self.auto_update_start_time = time.time()
         self.auto_update_job = self.after(self.auto_update_interval * 1000, auto_run)
         self._log_message(f"Auto-update enabled ({self.auto_update_interval}s interval)")
-        self._update_auto_status()
+        self._start_countdown_display()
 
     def _stop_auto_update(self):
         """Stop the auto-update timer."""
@@ -2099,7 +2231,34 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self.after_cancel(self.auto_update_job)
             self.auto_update_job = None
             self._log_message("Auto-update disabled")
+        self._stop_countdown_display()
         self._update_auto_status()
+
+    def _start_countdown_display(self):
+        """Start the countdown display timer."""
+        import time
+        self._stop_countdown_display()  # Cancel any existing countdown display
+
+        def update_countdown():
+            if self.auto_update_enabled and self.auto_update_job:
+                elapsed = time.time() - self.auto_update_start_time
+                remaining = max(0, self.auto_update_interval - int(elapsed))
+                self.status_label.configure(
+                    text=f"Ready (auto: {remaining}s)",
+                    text_color="#4CAF50"
+                )
+                # Schedule next update in 1 second
+                self.countdown_job = self.after(1000, update_countdown)
+            else:
+                self._update_auto_status()
+
+        update_countdown()
+
+    def _stop_countdown_display(self):
+        """Stop the countdown display timer."""
+        if self.countdown_job:
+            self.after_cancel(self.countdown_job)
+            self.countdown_job = None
 
     def _update_auto_status(self):
         """Update status label to show auto-update state."""
@@ -2173,6 +2332,13 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self.status_log.configure(state="disabled")
 
         self.after(0, update)
+
+    def _run_manual_update(self):
+        """Run manual update triggered by user clicking Update button."""
+        # Reset auto-update timer so it doesn't trigger right after manual update
+        if self.auto_update_enabled:
+            self._start_auto_update()
+        self._run_update()
 
     def _run_update(self):
         """Run incremental update in a background thread."""
@@ -2251,9 +2417,15 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             try:
                 self._log_message("Starting full rescan...")
 
+                # Create callback that filters debug messages based on setting
+                def filtered_callback(msg):
+                    if msg.startswith("DEBUG:") and not self.debug_logging:
+                        return
+                    self._log_message(msg)
+
                 # Full rescan to re-read all chat logs (with lock to protect shared data)
                 with self._data_lock:
-                    rescan_stats = self.parser.full_rescan(callback=self._log_message)
+                    rescan_stats = self.parser.full_rescan(callback=filtered_callback)
 
                 # Summarize results
                 new_creatures = rescan_stats.get("new_creatures", 0)
@@ -2478,8 +2650,11 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             widget.pack_forget()
 
         # Build zone display
-        if stats["zones"]:
-            # Zone is known - show clickable zone link and kills separately
+        # Show zone dropdown if:
+        # 1. Creature has no zones, OR
+        # 2. Debug zone editing is enabled
+        if stats["zones"] and not self.debug_zone_editing:
+            # Zone is known and not in debug mode - show clickable zone link and kills separately
             zone_name = stats["zones"][0]  # Primary zone
             self.zone_link.configure(text=f"Zone: {zone_name}")
             self.zone_link.pack(anchor="w")
@@ -2488,7 +2663,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self.detail_info_frame.pack_forget()
         else:
             self.zone_link.pack_forget()
-            # Zone is unknown - show dropdown
+            # Zone unknown OR debug mode enabled - show dropdown
             self.detail_info.pack_forget()
             self.detail_info_frame.pack(anchor="w", pady=(5, 0))
 
@@ -2500,7 +2675,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             )
             zone_prefix.pack(side="left")
 
-            self.zone_dropdown.set("Unknown")
+            # Set dropdown to current zone if available, or "Unknown"
+            current_zone = stats["zones"][0] if stats["zones"] else "Unknown"
+            self.zone_dropdown.set(current_zone)
             self.zone_dropdown.pack(side="left")
 
             kills_label = ctk.CTkLabel(

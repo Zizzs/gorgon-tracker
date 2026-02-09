@@ -65,6 +65,7 @@ ZONE_NAMES = {
     "AreaKelp": "Under the Sea",
     "AreaBigMine": "Borghild",
     "ChooseCharacter": None,  # Not a zone
+    "ReconnectToServer": None,  # Not a zone - connection state
 }
 
 # Official Project Gorgon item database URL
@@ -223,6 +224,9 @@ class LootParser:
         # Migrate legacy data from project root if needed
         self._migrate_legacy_data()
 
+        # Clean zone history to remove invalid entries
+        self._clean_zone_history()
+
         # Load creature data (source of truth)
         self.creature_data = self._load_creature_data()
 
@@ -351,6 +355,9 @@ class LootParser:
         if not history_file.exists():
             return transitions
 
+        # Get invalid zone names (those that map to None)
+        invalid_zones = {name for name, display in ZONE_NAMES.items() if display is None}
+
         try:
             with open(history_file, 'r', encoding='utf-8') as f:
                 for line in f:
@@ -361,6 +368,15 @@ class LootParser:
                     parts = line.split(' ', 2)  # Split into date, time, zone
                     if len(parts) == 3:
                         date_str, time_str, zone_name = parts
+                        # Validate date format (YYYY-MM-DD)
+                        if len(date_str) != 10 or date_str[4] != '-' or date_str[7] != '-':
+                            continue
+                        # Validate time format (HH:MM:SS)
+                        if len(time_str) != 8 or time_str[2] != ':' or time_str[5] != ':':
+                            continue
+                        # Skip invalid zone names
+                        if zone_name in invalid_zones:
+                            continue
                         try:
                             dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
                             transitions.append((dt, zone_name))
@@ -370,6 +386,74 @@ class LootParser:
             pass
 
         return sorted(transitions, key=lambda x: x[0])
+
+    def _clean_zone_history(self):
+        """
+        Clean zone_history.txt by removing invalid entries.
+
+        Removes entries that:
+        - Don't have valid YYYY-MM-DD HH:MM:SS format
+        - Have zone names that map to None in ZONE_NAMES (like ReconnectToServer)
+        """
+        history_file = self.storage_dir / "zone_history.txt"
+
+        if not history_file.exists():
+            return
+
+        # Get invalid zone names (those that map to None)
+        invalid_zones = {name for name, display in ZONE_NAMES.items() if display is None}
+
+        valid_entries = []
+        had_invalid = False
+
+        try:
+            with open(history_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    # Format: "2026-02-07 14:30:45 Kur Mountains"
+                    parts = line.split(' ', 2)
+                    if len(parts) != 3:
+                        had_invalid = True
+                        continue
+
+                    date_str, time_str, zone_name = parts
+
+                    # Validate date format (YYYY-MM-DD)
+                    if len(date_str) != 10 or date_str[4] != '-' or date_str[7] != '-':
+                        had_invalid = True
+                        continue
+
+                    # Validate time format (HH:MM:SS)
+                    if len(time_str) != 8 or time_str[2] != ':' or time_str[5] != ':':
+                        had_invalid = True
+                        continue
+
+                    # Skip invalid zone names
+                    if zone_name in invalid_zones:
+                        had_invalid = True
+                        continue
+
+                    # Validate the datetime can be parsed
+                    try:
+                        datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+                        valid_entries.append(line)
+                    except ValueError:
+                        had_invalid = True
+                        continue
+        except Exception:
+            return
+
+        # Only rewrite if we found invalid entries
+        if had_invalid:
+            try:
+                with open(history_file, 'w', encoding='utf-8') as f:
+                    for entry in valid_entries:
+                        f.write(entry + '\n')
+            except Exception:
+                pass
 
     def _update_skinning_history(self):
         """Parse Player.log for skinning events and append to persistent history."""
@@ -680,15 +764,31 @@ class LootParser:
     def _get_zone_at_time(self, timestamp: datetime) -> Optional[str]:
         """Get the zone the player was in at a given timestamp.
 
+        Only returns a zone if there's a zone transition from the SAME DAY.
+        This prevents incorrect zone assignment when zone data is missing
+        (e.g., Player.log was reset before zone data was captured).
+
         Both timestamp and zone_transitions are in local time.
         We compare full datetime objects to correctly handle midnight crossings.
         """
         if not self.zone_transitions:
             return None
 
-        current_zone = None
+        target_date = timestamp.date()
 
-        for zone_time, zone_name in self.zone_transitions:
+        # Filter to same-day transitions only
+        same_day_transitions = [
+            (zone_time, zone_name)
+            for zone_time, zone_name in self.zone_transitions
+            if zone_time.date() == target_date
+        ]
+
+        if not same_day_transitions:
+            return None
+
+        # Find the last transition before or at the timestamp
+        current_zone = None
+        for zone_time, zone_name in same_day_transitions:
             if zone_time <= timestamp:
                 current_zone = zone_name
             else:
@@ -784,9 +884,10 @@ class LootParser:
         utc_now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
         self.creature_data[creature]["last_updated"] = utc_now
 
-        # Add zone if known and not already recorded
-        if zone and zone not in self.creature_data[creature]["zones"]:
-            self.creature_data[creature]["zones"].append(zone)
+        # Add zone if known, or "Unknown" if no zone data available
+        zone_to_add = zone if zone else "Unknown"
+        if zone_to_add not in self.creature_data[creature]["zones"]:
+            self.creature_data[creature]["zones"].append(zone_to_add)
             self.creature_data[creature]["zones"].sort()
 
     def _record_loot(self, creature: str, base_name: str, count: int = 1,
@@ -817,7 +918,7 @@ class LootParser:
                 "drops": 1,  # Number of drop events (for drop rate calculation)
                 "first_seen": today,
                 "last_seen": today,
-                "zones": [zone] if zone else [],
+                "zones": [zone] if zone else ["Unknown"],
                 "wiki_only": False
             }
         else:
@@ -1227,6 +1328,9 @@ class LootParser:
         log_files = sorted(self.chatlog_dir.glob("Chat-*.log"))
         stats = {"new_creatures": 0, "new_items": 0, "new_skinning": 0, "new_butchering": 0, "skipped_old": 0}
 
+        # DEBUG: Track kill counts to identify double-counting bug
+        debug_kill_counts = {}
+
         for log_file in log_files:
             if callback:
                 callback(f"Rescanning {log_file.name}...")
@@ -1245,6 +1349,8 @@ class LootParser:
             kill_timestamp = None  # Track when the kill happened for loot window
             last_loot = None  # Track last loot for retrospective skinning detection
 
+            line_count = 0  # Track total lines for processed_state update
+
             with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
                 # First, try to find timezone offset from the login line
                 first_line = f.readline()
@@ -1255,7 +1361,7 @@ class LootParser:
                     self._timezone_offset_hours = sign * hours
                 f.seek(0)  # Reset to beginning
 
-                for line in f:
+                for line_count, line in enumerate(f, 1):
                     match = self.LOG_LINE_PATTERN.match(line.strip())
                     if not match:
                         continue
@@ -1318,16 +1424,21 @@ class LootParser:
                             # Increment kills
                             self.creature_data[current_creature]["kills"] += 1
 
+                            # DEBUG: Track this kill increment
+                            if current_creature not in debug_kill_counts:
+                                debug_kill_counts[current_creature] = 0
+                            debug_kill_counts[current_creature] += 1
+
                             # Update last_updated timestamp
                             self.creature_data[current_creature]["last_updated"] = current_utc_timestamp
 
-                            # Add zone if not present
-                            if current_zone:
-                                zones = self.creature_data[current_creature].get("zones", [])
-                                if current_zone not in zones:
-                                    zones.append(current_zone)
-                                    zones.sort()
-                                    self.creature_data[current_creature]["zones"] = zones
+                            # Add zone if not present (use "Unknown" if no zone data)
+                            zone_to_add = current_zone if current_zone else "Unknown"
+                            zones = self.creature_data[current_creature].get("zones", [])
+                            if zone_to_add not in zones:
+                                zones.append(zone_to_add)
+                                zones.sort()
+                                self.creature_data[current_creature]["zones"] = zones
 
                             # Zone self-healing: fix incorrect zone assignments
                             if current_zone and current_creature in self.creature_data:
@@ -1412,7 +1523,7 @@ class LootParser:
                                     "drops": 1,  # Number of drop events (for drop rate calculation)
                                     "first_seen": today,
                                     "last_seen": today,
-                                    "zones": [current_zone] if current_zone else [],
+                                    "zones": [current_zone] if current_zone else ["Unknown"],
                                     "wiki_only": False
                                 }
                                 stats["new_items"] += 1
@@ -1439,6 +1550,11 @@ class LootParser:
                                 "timestamp": current_timestamp
                             }
 
+            # Update processed_state so incremental updates don't re-process these lines
+            self.processed_state["files"][log_file.name] = line_count
+
+        # Save processed state so auto-update knows where to start
+        self._save_state()
         self._save_creature_data()
 
         # Mirror all log files after full rescan
@@ -1448,6 +1564,11 @@ class LootParser:
             callback(f"Rescan complete: {stats['new_creatures']} new creatures, {stats['new_items']} new items, {stats['new_skinning']} skinning, {stats.get('new_butchering', 0)} butchering")
             if stats["skipped_old"] > 0:
                 callback(f"  (Skipped {stats['skipped_old']} already-processed entries)")
+
+            # DEBUG: Output kill counts to identify double-counting
+            callback(f"DEBUG: Kill increments in full_rescan (first 10):")
+            for i, (creature, count) in enumerate(sorted(debug_kill_counts.items(), key=lambda x: -x[1])[:10]):
+                callback(f"  {creature}: {count} kills")
 
         return stats
 
