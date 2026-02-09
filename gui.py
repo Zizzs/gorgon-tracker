@@ -22,6 +22,9 @@ from loot_parser import LootParser, ZONE_NAMES
 from paths import get_gorgon_tracker_data_dir, get_pg_chatlog_dir
 from reports_parser import ReportsParser, FAVOR_DISPLAY, FAVOR_LEVELS
 
+# Application version - used for update checking
+__version__ = "1.0.0"
+
 # List of valid zone display names for dropdown
 VALID_ZONES = sorted(set(name for name in ZONE_NAMES.values() if name is not None))
 
@@ -262,6 +265,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         # Hover throttle state
         self.last_hover_time = 0
 
+        # App update state
+        self._pending_update = None  # Stores update info when available
+
         # Current left tab selection
         self.current_left_tab = "Creatures"
 
@@ -299,6 +305,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._start_auto_update()
         else:
             self._update_auto_status()
+
+        # Check for application updates after 5 seconds
+        self.after(5000, self._check_for_app_updates)
 
     def _load_settings(self):
         """Load GUI settings from file, migrating from legacy location if needed."""
@@ -539,6 +548,19 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             font=ctk.CTkFont(size=14)
         )
         self.options_button.pack(side="right", padx=10, pady=7)
+
+        # App update button (hidden until update is available)
+        self.update_app_button = ctk.CTkButton(
+            button_frame,
+            text="Update Available!",
+            command=self._start_app_update,
+            width=140,
+            height=35,
+            fg_color="#4CAF50",
+            hover_color="#45a049",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        # Don't pack initially - only show when update is detected
 
         # Stats button
         self.stats_button = ctk.CTkButton(
@@ -3369,6 +3391,143 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             return "#FF9800"  # Orange
         else:
             return "#F44336"  # Red - rare
+
+    # =========================================================================
+    # Application Self-Update Methods
+    # =========================================================================
+
+    def _check_for_app_updates(self):
+        """Check GitHub for application updates (runs in background)."""
+        def check():
+            try:
+                from updater import (
+                    get_latest_release_info, is_update_available,
+                    get_download_url, get_release_version, is_running_frozen
+                )
+
+                # Only check for updates when running as compiled exe
+                if not is_running_frozen():
+                    return
+
+                release_info = get_latest_release_info()
+                if release_info and is_update_available(__version__, release_info):
+                    download_url = get_download_url(release_info)
+                    if download_url:
+                        # Store for later use
+                        self._pending_update = {
+                            "version": get_release_version(release_info),
+                            "url": download_url,
+                            "release_info": release_info
+                        }
+                        # Show button on main thread
+                        self.after(0, self._show_update_button)
+            except Exception as e:
+                # Silently fail - update check is non-critical
+                pass
+
+        thread = threading.Thread(target=check, daemon=True)
+        thread.start()
+
+    def _show_update_button(self):
+        """Show the update available button (called from main thread)."""
+        if self._pending_update:
+            version = self._pending_update.get("version", "")
+            self.update_app_button.configure(text=f"Update to {version}!")
+            self.update_app_button.pack(side="right", padx=5, pady=7)
+            self._log_message(f"Update available: {version}")
+
+    def _start_app_update(self):
+        """Download and install the update."""
+        if not self._pending_update:
+            return
+
+        from updater import (
+            download_update, extract_update, get_install_dir,
+            generate_update_script, launch_update_script, is_running_frozen
+        )
+
+        # Disable the button and show progress
+        self.update_app_button.configure(state="disabled", text="Downloading...")
+
+        # Disable the entire window to prevent any user interaction
+        self._disable_window_for_update()
+
+        def do_update():
+            try:
+                # Download
+                def progress(downloaded, total):
+                    pct = int(downloaded / total * 100)
+                    self.after(0, lambda p=pct: self.update_app_button.configure(
+                        text=f"Downloading... {p}%"
+                    ))
+
+                zip_path = download_update(self._pending_update["url"], progress)
+                if not zip_path:
+                    raise Exception("Download failed")
+
+                # Extract
+                self.after(0, lambda: self.update_app_button.configure(text="Extracting..."))
+                new_version_path = extract_update(zip_path)
+                if not new_version_path:
+                    raise Exception("Extraction failed")
+
+                # Generate update script
+                install_dir = get_install_dir()
+                script_path = generate_update_script(new_version_path, install_dir)
+
+                # Launch script and exit
+                self.after(0, lambda: self._finalize_update(script_path))
+
+            except Exception as e:
+                self.after(0, lambda err=str(e): self._update_failed(err))
+
+        thread = threading.Thread(target=do_update, daemon=True)
+        thread.start()
+
+    def _disable_window_for_update(self):
+        """Disable all interactive elements during update."""
+        # Disable main buttons
+        self.update_button.configure(state="disabled")
+        self.full_rescan_button.configure(state="disabled")
+        self.options_button.configure(state="disabled")
+        self.stats_button.configure(state="disabled")
+
+        # Log the action
+        self._log_message("Downloading update... please wait.")
+
+    def _enable_window_after_update(self):
+        """Re-enable all interactive elements if update fails."""
+        self.update_button.configure(state="normal")
+        self.full_rescan_button.configure(state="normal")
+        self.options_button.configure(state="normal")
+        self.stats_button.configure(state="normal")
+
+    def _finalize_update(self, script_path):
+        """Launch update script and exit application."""
+        from updater import launch_update_script
+
+        self._log_message("Launching updater and exiting...")
+        self.update_app_button.configure(text="Restarting...")
+
+        # Launch the update script
+        launch_update_script(script_path)
+
+        # Give the script a moment to start, then exit
+        self.after(500, self.destroy)
+
+    def _update_failed(self, error: str):
+        """Handle update failure."""
+        self._log_message(f"Update failed: {error}")
+
+        # Re-enable window
+        self._enable_window_after_update()
+
+        # Reset button state with error indication
+        self.update_app_button.configure(
+            state="normal",
+            text="Update Failed - Retry?",
+            fg_color="#f44336"  # Red to indicate error
+        )
 
 
 def main():
