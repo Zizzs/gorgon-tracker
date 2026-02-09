@@ -151,8 +151,24 @@ class LootParser:
     # Regex patterns for Player.log
     PLAYER_LOG_ZONE_PATTERN = re.compile(r'^\[(\d{2}:\d{2}:\d{2})\] LOADING LEVEL (.+)$')
 
+    # Pattern to match skinning/butchering in Player.log ProcessTalkScreen
+    # Example: [15:59:08] LocalPlayer: ProcessTalkScreen(2281134, "Search Corpse of Wild Pig",
+    #   "...Zizzs skinned the corpse (with a +8 skill bonus from equipment) and obtained Rough Animal Skin x2 plus Shoddy Animal Skin...")
+    # Note: DOTALL allows .*? to match across newlines since ProcessTalkScreen can span multiple lines
+    PLAYER_LOG_CORPSE_PATTERN = re.compile(
+        r'\[(\d{2}:\d{2}:\d{2})\] LocalPlayer: ProcessTalkScreen\((\d+), "Search Corpse of ([^"]+)".*?'
+        r'\w+ (skinned|butchered) the corpse.*?and obtained ([^"]+)"',
+        re.IGNORECASE | re.DOTALL
+    )
+
     # Pattern to extract timezone offset from chat log login line
     TIMEZONE_PATTERN = re.compile(r'Timezone Offset ([+-])(\d{2}):(\d{2}):(\d{2})')
+
+    # Pattern to match ProcessAddItem in Player.log for loot validation
+    # Example: [15:59:08] LocalPlayer: ProcessAddItem(BasicSword(12345), InventorySlot, True)
+    PLAYER_LOG_ADDITEM_PATTERN = re.compile(
+        r'\[(\d{2}:\d{2}:\d{2})\] LocalPlayer: ProcessAddItem\(([^(]+)\((\d+)\),'
+    )
 
     def __init__(self, chatlog_dir: str = None, output_dir: str = "CreaturePages",
                  storage_dir: Path = None):
@@ -291,8 +307,13 @@ class LootParser:
             except Exception:
                 pass
 
-        # Get today's date for new entries
-        today = datetime.now().strftime("%Y-%m-%d")
+        # Use Player.log file modification date instead of current date
+        # This ensures correct dates when processing logs from previous sessions
+        try:
+            log_mtime = os.path.getmtime(self.player_log_path)
+            log_date = datetime.fromtimestamp(log_mtime).strftime("%Y-%m-%d")
+        except (OSError, ValueError):
+            log_date = datetime.now().strftime("%Y-%m-%d")
 
         # Read current Player.log and append new entries
         new_entries = []
@@ -305,7 +326,7 @@ class LootParser:
                         zone_name = ZONE_NAMES.get(zone_internal, zone_internal)
                         if zone_name is None:  # Skip non-zones like ChooseCharacter
                             continue
-                        entry = f"{today} {time_str} {zone_name}"
+                        entry = f"{log_date} {time_str} {zone_name}"
                         if entry not in existing_entries:
                             new_entries.append(entry)
                             existing_entries.add(entry)
@@ -349,6 +370,228 @@ class LootParser:
             pass
 
         return sorted(transitions, key=lambda x: x[0])
+
+    def _update_skinning_history(self):
+        """Parse Player.log for skinning events and append to persistent history."""
+        self._update_corpse_action_history("skinned", "skinning_history.txt")
+
+    def _update_butchering_history(self):
+        """Parse Player.log for butchering events and append to persistent history."""
+        self._update_corpse_action_history("butchered", "butchering_history.txt")
+
+    def _update_loot_history(self):
+        """
+        Parse Player.log for ProcessAddItem entries and append to persistent history.
+        This provides validation data that can be cross-referenced with chat log timestamps.
+        """
+        if not self.player_log_path.exists():
+            return
+
+        history_file = self.storage_dir / "loot_history.txt"
+
+        # Load existing history to avoid duplicates
+        existing_entries = set()
+        if history_file.exists():
+            try:
+                with open(history_file, 'r', encoding='utf-8') as f:
+                    existing_entries = set(line.strip() for line in f if line.strip())
+            except Exception:
+                pass
+
+        # Use Player.log file modification date
+        try:
+            log_mtime = os.path.getmtime(self.player_log_path)
+            log_date = datetime.fromtimestamp(log_mtime).strftime("%Y-%m-%d")
+        except (OSError, ValueError):
+            log_date = datetime.now().strftime("%Y-%m-%d")
+
+        # Read current Player.log and find ProcessAddItem entries
+        new_entries = []
+        try:
+            with open(self.player_log_path, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    match = self.PLAYER_LOG_ADDITEM_PATTERN.match(line.strip())
+                    if match:
+                        time_str, item_internal_name, item_id = match.groups()
+                        # Format: YYYY-MM-DD HH:MM:SS|item_internal_name|item_id
+                        entry = f"{log_date} {time_str}|{item_internal_name}|{item_id}"
+                        if entry not in existing_entries:
+                            new_entries.append(entry)
+                            existing_entries.add(entry)
+        except Exception as e:
+            print(f"Warning: Could not read Player.log for loot history: {e}")
+            return
+
+        # Append new entries to history
+        if new_entries:
+            try:
+                with open(history_file, 'a', encoding='utf-8') as f:
+                    for entry in new_entries:
+                        f.write(entry + '\n')
+            except Exception as e:
+                print(f"Warning: Could not write loot history: {e}")
+
+    def _update_corpse_action_history(self, action_type: str, history_filename: str):
+        """
+        Parse Player.log for skinning/butchering events and append to persistent history.
+
+        Args:
+            action_type: "skinned" or "butchered"
+            history_filename: Name of the history file to write to
+        """
+        if not self.player_log_path.exists():
+            return
+
+        history_file = self.storage_dir / history_filename
+
+        # Load existing history to avoid duplicates
+        existing_entries = set()
+        if history_file.exists():
+            try:
+                with open(history_file, 'r', encoding='utf-8') as f:
+                    existing_entries = set(line.strip() for line in f if line.strip())
+            except Exception:
+                pass
+
+        # Use Player.log file modification date
+        try:
+            log_mtime = os.path.getmtime(self.player_log_path)
+            log_date = datetime.fromtimestamp(log_mtime).strftime("%Y-%m-%d")
+        except (OSError, ValueError):
+            log_date = datetime.now().strftime("%Y-%m-%d")
+
+        # Read current Player.log and find corpse action entries
+        new_entries = []
+        try:
+            with open(self.player_log_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+                # ProcessTalkScreen can span multiple lines, so we need to search the whole content
+                for match in self.PLAYER_LOG_CORPSE_PATTERN.finditer(content):
+                    time_str, entity_id, creature, action, items_str = match.groups()
+
+                    # Only process entries matching our action type
+                    if action.lower() != action_type:
+                        continue
+
+                    # Parse items: "Rough Animal Skin x2 plus Shoddy Animal Skin"
+                    # Items are separated by " plus "
+                    items = self._parse_corpse_items(items_str)
+
+                    # Format: YYYY-MM-DD HH:MM:SS|entity_id|creature|item1,item2,...
+                    items_formatted = ",".join(f"{name}:{count}" for name, count in items)
+                    entry = f"{log_date} {time_str}|{entity_id}|{creature}|{items_formatted}"
+
+                    if entry not in existing_entries:
+                        new_entries.append(entry)
+                        existing_entries.add(entry)
+        except Exception as e:
+            print(f"Warning: Could not read Player.log for {action_type}: {e}")
+            return
+
+        # Append new entries to history
+        if new_entries:
+            try:
+                with open(history_file, 'a', encoding='utf-8') as f:
+                    for entry in new_entries:
+                        f.write(entry + '\n')
+            except Exception as e:
+                print(f"Warning: Could not write {action_type} history: {e}")
+
+    def _parse_corpse_items(self, items_str: str) -> list[tuple[str, int]]:
+        """
+        Parse items string from ProcessTalkScreen.
+
+        Args:
+            items_str: String like "Rough Animal Skin x2 plus Shoddy Animal Skin"
+
+        Returns:
+            List of (item_name, count) tuples
+        """
+        items = []
+        # Split by " plus "
+        parts = items_str.split(" plus ")
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+
+            # Check for "x2" count suffix
+            count_match = re.search(r'^(.+?)\s+x(\d+)$', part)
+            if count_match:
+                name = count_match.group(1).strip()
+                count = int(count_match.group(2))
+            else:
+                name = part
+                count = 1
+
+            if name:
+                items.append((name, count))
+
+        return items
+
+    def _load_skinning_history(self) -> list[tuple[datetime, str, str, list[tuple[str, int]]]]:
+        """
+        Load skinning history from persistent file.
+
+        Returns:
+            List of (datetime, entity_id, creature, items) tuples
+            where items is a list of (item_name, count) tuples
+        """
+        return self._load_corpse_action_history("skinning_history.txt")
+
+    def _load_butchering_history(self) -> list[tuple[datetime, str, str, list[tuple[str, int]]]]:
+        """
+        Load butchering history from persistent file.
+
+        Returns:
+            List of (datetime, entity_id, creature, items) tuples
+            where items is a list of (item_name, count) tuples
+        """
+        return self._load_corpse_action_history("butchering_history.txt")
+
+    def _load_corpse_action_history(self, history_filename: str) -> list[tuple[datetime, str, str, list[tuple[str, int]]]]:
+        """
+        Load corpse action history from persistent file.
+
+        Args:
+            history_filename: Name of the history file to read
+
+        Returns:
+            List of (datetime, entity_id, creature, items) tuples
+        """
+        history = []
+        history_file = self.storage_dir / history_filename
+
+        if not history_file.exists():
+            return history
+
+        try:
+            with open(history_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    # Format: "YYYY-MM-DD HH:MM:SS|entity_id|creature|item1:count1,item2:count2,..."
+                    try:
+                        datetime_part, entity_id, creature, items_part = line.split('|', 3)
+                        dt = datetime.strptime(datetime_part, "%Y-%m-%d %H:%M:%S")
+
+                        # Parse items
+                        items = []
+                        if items_part:
+                            for item_entry in items_part.split(','):
+                                if ':' in item_entry:
+                                    name, count_str = item_entry.rsplit(':', 1)
+                                    items.append((name, int(count_str)))
+
+                        history.append((dt, entity_id, creature, items))
+                    except (ValueError, IndexError):
+                        continue
+        except Exception:
+            pass
+
+        return sorted(history, key=lambda x: x[0])
 
     def _mirror_all_logs(self):
         """Mirror all Chat-*.log files and update zone history."""
@@ -571,6 +814,7 @@ class LootParser:
         if is_new:
             items[base_name] = {
                 "count": count,
+                "drops": 1,  # Number of drop events (for drop rate calculation)
                 "first_seen": today,
                 "last_seen": today,
                 "zones": [zone] if zone else [],
@@ -578,6 +822,7 @@ class LootParser:
             }
         else:
             items[base_name]["count"] += count
+            items[base_name]["drops"] = items[base_name].get("drops", 1) + 1  # Increment drop events
             items[base_name]["last_seen"] = today
             # Add zone if not already tracked
             if zone:
@@ -610,11 +855,13 @@ class LootParser:
         if is_new:
             skinning[base_name] = {
                 "count": count,
+                "drops": 1,  # Number of drop events (for drop rate calculation)
                 "first_seen": today,
                 "last_seen": today
             }
         else:
             skinning[base_name]["count"] += count
+            skinning[base_name]["drops"] = skinning[base_name].get("drops", 1) + 1  # Increment drop events
             skinning[base_name]["last_seen"] = today
 
         return is_new
@@ -637,11 +884,13 @@ class LootParser:
         if is_new:
             butchering[base_name] = {
                 "count": count,
+                "drops": 1,  # Number of drop events (for drop rate calculation)
                 "first_seen": today,
                 "last_seen": today
             }
         else:
             butchering[base_name]["count"] += count
+            butchering[base_name]["drops"] = butchering[base_name].get("drops", 1) + 1  # Increment drop events
             butchering[base_name]["last_seen"] = today
 
         return is_new
@@ -830,9 +1079,12 @@ class LootParser:
                 callback(f"Error: Chat log directory not found: {self.chatlog_dir}")
             return results
 
-        # Capture zone transitions FIRST, before processing any logs
+        # Capture zone transitions and skinning/butchering/loot history FIRST
         # This prevents data loss if Player.log gets overwritten between sessions
         self._update_zone_history()
+        self._update_skinning_history()
+        self._update_butchering_history()
+        self._update_loot_history()
 
         log_files = sorted(self.chatlog_dir.glob("Chat-*.log"))
 
@@ -965,9 +1217,12 @@ class LootParser:
         if not self.chatlog_dir.exists():
             return {}
 
-        # Capture zone transitions FIRST, before processing any logs
+        # Capture zone transitions and skinning/butchering/loot history FIRST
         # This prevents data loss if Player.log gets overwritten between sessions
         self._update_zone_history()
+        self._update_skinning_history()
+        self._update_butchering_history()
+        self._update_loot_history()
 
         log_files = sorted(self.chatlog_dir.glob("Chat-*.log"))
         stats = {"new_creatures": 0, "new_items": 0, "new_skinning": 0, "new_butchering": 0, "skipped_old": 0}
@@ -1121,11 +1376,15 @@ class LootParser:
 
                                         if loot_base_name not in category:
                                             category[loot_base_name] = {
-                                                "count": loot_count, "first_seen": today, "last_seen": today
+                                                "count": loot_count,
+                                                "drops": 1,  # Number of drop events
+                                                "first_seen": today,
+                                                "last_seen": today
                                             }
                                             stats[stat_key] = stats.get(stat_key, 0) + 1
                                         else:
                                             category[loot_base_name]["count"] += loot_count
+                                            category[loot_base_name]["drops"] = category[loot_base_name].get("drops", 1) + 1
                                             category[loot_base_name]["last_seen"] = today
 
                             last_loot = None
@@ -1150,6 +1409,7 @@ class LootParser:
                             if base_name not in items:
                                 items[base_name] = {
                                     "count": count,
+                                    "drops": 1,  # Number of drop events (for drop rate calculation)
                                     "first_seen": today,
                                     "last_seen": today,
                                     "zones": [current_zone] if current_zone else [],
@@ -1158,6 +1418,7 @@ class LootParser:
                                 stats["new_items"] += 1
                             else:
                                 items[base_name]["count"] += count
+                                items[base_name]["drops"] = items[base_name].get("drops", 1) + 1  # Increment drop events
                                 items[base_name]["last_seen"] = today
                                 # Add zone if not already tracked
                                 if current_zone:
@@ -1290,12 +1551,15 @@ class LootParser:
 
         for item_name, item_data in items.items():
             count = item_data.get("count", 0)
+            # Use drops for rate calculation, fallback to count for old data
+            drops = item_data.get("drops", item_data.get("count", 0))
             # wiki_only items don't count toward drop rate
             wiki_only = item_data.get("wiki_only", False)
-            drop_rate = (count / kills * 100) if kills > 0 and not wiki_only else 0
+            drop_rate = (drops / kills * 100) if kills > 0 and not wiki_only else 0
 
             stats["items"][item_name] = {
                 "count": count,
+                "drops": drops,
                 "drop_rate": round(drop_rate, 2),
                 "first_seen": item_data.get("first_seen"),
                 "last_seen": item_data.get("last_seen"),
@@ -1305,10 +1569,13 @@ class LootParser:
 
         for item_name, item_data in skinning.items():
             count = item_data.get("count", 0)
-            drop_rate = (count / kills * 100) if kills > 0 else 0
+            # Use drops for rate calculation, fallback to count for old data
+            drops = item_data.get("drops", item_data.get("count", 0))
+            drop_rate = (drops / kills * 100) if kills > 0 else 0
 
             stats["skinning"][item_name] = {
                 "count": count,
+                "drops": drops,
                 "drop_rate": round(drop_rate, 2),
                 "first_seen": item_data.get("first_seen"),
                 "last_seen": item_data.get("last_seen")
@@ -1316,10 +1583,13 @@ class LootParser:
 
         for item_name, item_data in butchering.items():
             count = item_data.get("count", 0)
-            drop_rate = (count / kills * 100) if kills > 0 else 0
+            # Use drops for rate calculation, fallback to count for old data
+            drops = item_data.get("drops", item_data.get("count", 0))
+            drop_rate = (drops / kills * 100) if kills > 0 else 0
 
             stats["butchering"][item_name] = {
                 "count": count,
+                "drops": drops,
                 "drop_rate": round(drop_rate, 2),
                 "first_seen": item_data.get("first_seen"),
                 "last_seen": item_data.get("last_seen")
@@ -1379,10 +1649,12 @@ class LootParser:
             for item_name, item_data in items.items():
                 all_items.add(item_name)
 
-                # Find rarest drop (exclude wiki_only items, require count > 0)
-                if not item_data.get("wiki_only", False) and item_data.get("count", 0) > 0:
+                # Find rarest drop (exclude wiki_only items, require drops > 0)
+                # Use drops for rate calculation, fallback to count for old data
+                drops = item_data.get("drops", item_data.get("count", 0))
+                if not item_data.get("wiki_only", False) and drops > 0:
                     if kills > 0:
-                        drop_rate = (item_data.get("count", 0) / kills) * 100
+                        drop_rate = (drops / kills) * 100
                         if drop_rate < rarest_rate:
                             rarest_rate = drop_rate
                             rarest_item = item_name
