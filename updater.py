@@ -7,7 +7,6 @@ import sys
 import json
 import tempfile
 import zipfile
-import subprocess
 import shutil
 from pathlib import Path
 from urllib.request import urlopen, Request
@@ -212,9 +211,7 @@ del "%~f0"
 
 def launch_update_script(script_path: Path):
     """Launch the update script and prepare to exit."""
-    # Use subprocess to run batch file in a new console, detached from this process
-    subprocess.Popen(
-        ['cmd', '/c', str(script_path)],
-        creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS,
-        close_fds=True
-    )
+    # Use os.startfile which is the proper Windows API for launching detached processes.
+    # This avoids issues with subprocess.Popen where close_fds=True + DETACHED_PROCESS
+    # can prevent the subprocess from launching properly on Windows.
+    os.startfile(str(script_path))

@@ -92,6 +92,24 @@ jobs:
           echo "EOF" >> $env:GITHUB_OUTPUT
         shell: pwsh
 
+      - name: Delete previous release
+        run: |
+          $prevTag = "${{ steps.version.outputs.PREV_TAG }}"
+          if ($prevTag -ne "v0.0.0" -and $prevTag -ne "v1.0.0") {
+            Write-Host "Deleting previous release: $prevTag"
+            gh release delete $prevTag --yes --cleanup-tag 2>$null
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "Successfully deleted release $prevTag"
+            } else {
+              Write-Host "No release found for $prevTag (this is OK for first releases)"
+            }
+          } else {
+            Write-Host "Skipping deletion of baseline version: $prevTag"
+          }
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:

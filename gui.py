@@ -558,6 +558,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             height=35,
             fg_color="#4CAF50",
             hover_color="#45a049",
+            text_color="black",
             font=ctk.CTkFont(size=14, weight="bold")
         )
         # Don't pack initially - only show when update is detected
@@ -3432,7 +3433,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         """Show the update available button (called from main thread)."""
         if self._pending_update:
             version = self._pending_update.get("version", "")
-            self.update_app_button.configure(text=f"Update to {version}!")
+            self.update_app_button.configure(text=f"Update to {version}!", text_color="black")
             self.update_app_button.pack(side="right", padx=5, pady=7)
             self._log_message(f"Update available: {version}")
 
@@ -3447,7 +3448,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
 
         # Disable the button and show progress
-        self.update_app_button.configure(state="disabled", text="Downloading...")
+        self.update_app_button.configure(state="disabled", text="Downloading...", text_color="black")
 
         # Disable the entire window to prevent any user interaction
         self._disable_window_for_update()
@@ -3458,7 +3459,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 def progress(downloaded, total):
                     pct = int(downloaded / total * 100)
                     self.after(0, lambda p=pct: self.update_app_button.configure(
-                        text=f"Downloading... {p}%"
+                        text=f"Downloading... {p}%", text_color="black"
                     ))
 
                 zip_path = download_update(self._pending_update["url"], progress)
@@ -3466,7 +3467,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     raise Exception("Download failed")
 
                 # Extract
-                self.after(0, lambda: self.update_app_button.configure(text="Extracting..."))
+                self.after(0, lambda: self.update_app_button.configure(text="Extracting...", text_color="black"))
                 new_version_path = extract_update(zip_path)
                 if not new_version_path:
                     raise Exception("Extraction failed")
@@ -3507,13 +3508,18 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         from updater import launch_update_script
 
         self._log_message("Launching updater and exiting...")
-        self.update_app_button.configure(text="Restarting...")
+        self.update_app_button.configure(text="Restarting...", text_color="black")
 
         # Launch the update script
         launch_update_script(script_path)
 
-        # Give the script a moment to start, then exit
-        self.after(500, self.destroy)
+        # Give the script a moment to start, then exit completely
+        self.after(1000, self._exit_for_update)
+
+    def _exit_for_update(self):
+        """Destroy window and exit process for update."""
+        self.destroy()
+        sys.exit(0)
 
     def _update_failed(self, error: str):
         """Handle update failure."""
@@ -3526,7 +3532,8 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.update_app_button.configure(
             state="normal",
             text="Update Failed - Retry?",
-            fg_color="#f44336"  # Red to indicate error
+            fg_color="#f44336",  # Red to indicate error
+            text_color="white"
         )
 
 
