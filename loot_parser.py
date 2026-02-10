@@ -1961,24 +1961,24 @@ class LootParser:
         if not items and not skinning and not butchering:
             return "== Reported Loot ==\nNo loot reported yet.\n"
 
-        # Categorize items by zone
-        general_items = []  # Items when creature has no zone
-        zone_items = defaultdict(list)  # Items for specific zones
+        # Categorize items by zone count:
+        # - Single-zone items (not Unknown) → zone-specific section
+        # - Multi-zone items or Unknown zone → General Loot
+        general_items = []  # Items that drop in multiple zones or Unknown
+        zone_items = defaultdict(list)  # Items for specific zones (single-zone only)
 
         for item_name, item_data in items.items():
             item_zones = item_data.get("zones", [])
 
-            if not creature_zones:
-                # Creature has no zone data - all items go to general
+            # Multi-zone or no zone → General Loot
+            if len(item_zones) != 1:
                 general_items.append(item_name)
-            elif item_zones:
-                # Item has zone data - put in those zones
-                for zone in item_zones:
-                    zone_items[zone].append(item_name)
+            elif item_zones[0] == "Unknown":
+                # Unknown zone → General Loot
+                general_items.append(item_name)
             else:
-                # Item has no zone but creature does - use creature's zones
-                for zone in creature_zones:
-                    zone_items[zone].append(item_name)
+                # Single zone (not Unknown) → zone-specific
+                zone_items[item_zones[0]].append(item_name)
 
         lines = ["== Reported Loot ==", ""]
 
@@ -2020,121 +2020,67 @@ class LootParser:
 
     def insert_loot_into_wiki(self, creature: str, wiki_text: str) -> str:
         """
-        Insert NEW items into existing wiki content without removing or moving existing items.
+        Replace the Reported Loot section with regenerated content from our database.
 
-        This is additive only - we preserve all existing wiki content and only add
-        items that we have but the wiki doesn't.
+        This preserves all other wiki sections (MOB infobox, Locations, Combat Abilities, etc.)
+        while replacing the loot-related sections (Reported Loot, Skinning, Butchering) with
+        properly formatted content generated from our merged data.
 
         Args:
             creature: The creature name
             wiki_text: The original wiki page content
 
         Returns:
-            Updated wiki content with new items added
+            Updated wiki content with replaced loot sections
         """
         if creature not in self.creature_data:
             return wiki_text
 
-        # Parse existing wiki items
-        wiki_items = self.parse_wiki_loot(wiki_text)
-        all_wiki_items = set()
-        for zone_items in wiki_items.values():
-            all_wiki_items.update(zone_items)
+        # Generate the fresh loot content from our merged data
+        new_loot_content = self.generate_wiki_syntax_with_zones(creature)
 
-        # Get our items
-        data = self.creature_data[creature]
-        our_items = set(data.get("items", {}).keys())
-        creature_zones = data.get("zones", [])
+        # Find the start of the Reported Loot section
+        loot_start_match = re.search(r'^==\s*Reported\s+Loot\s*==', wiki_text, re.MULTILINE | re.IGNORECASE)
 
-        # Find items we have that wiki doesn't
-        new_items = our_items - all_wiki_items
+        if not loot_start_match:
+            # No Reported Loot section found - append our content at the end
+            return wiki_text.rstrip() + "\n\n" + new_loot_content
 
-        if not new_items:
-            # Nothing new to add
-            return wiki_text
+        loot_start = loot_start_match.start()
 
-        # Categorize new items by zone
-        general_new = []
-        zone_new = defaultdict(list)
+        # Find the end of loot-related sections
+        # Loot sections include: Reported Loot, Skinning, Butchering
+        # We need to find the next top-level section (== X ==) that isn't one of these
+        remaining_text = wiki_text[loot_start:]
 
-        for item_name in new_items:
-            item_data = data["items"].get(item_name, {})
-            item_zones = item_data.get("zones", [])
+        # Pattern to match top-level sections (== ... == but not ==== ... ====)
+        # This works because [^=\n]+? requires at least one non-= character after the opening ==
+        section_pattern = re.compile(r'^==\s*([^=\n]+?)\s*==\s*$', re.MULTILINE)
 
-            if not creature_zones:
-                # Creature has no zone - add to general
-                general_new.append(item_name)
-            elif item_zones:
-                # Item has zone data
-                for zone in item_zones:
-                    zone_new[zone].append(item_name)
-            else:
-                # Item has no zone but creature does - use creature's zones
-                for zone in creature_zones:
-                    zone_new[zone].append(item_name)
+        loot_related_sections = {'reported loot', 'skinning', 'butchering'}
+        end_of_loot = len(wiki_text)  # Default to end of document
 
-        # Now we need to insert these new items into the appropriate sections
-        result = wiki_text
-
-        # Helper to format items for insertion (with line breaks every 4 items)
-        def format_new_items(items):
-            sorted_items = sorted(items)
-            lines = []
-            for i, item in enumerate(sorted_items):
-                lines.append(f"|{{{{Loot|{item}}}}}")
-                # Add row break after every 4 items, but not after the last item
-                if (i + 1) % 4 == 0 and i < len(sorted_items) - 1:
-                    lines.append("|-")
-            return "\n".join(lines)
-
-        # Insert into General Loot section if we have general items
-        if general_new:
-            general_pattern = re.compile(r'(====\s*General\s*Loot\s*====.*?)(\|})', re.DOTALL | re.IGNORECASE)
-            match = general_pattern.search(result)
-            if match:
-                # Insert before the closing |}
-                insert_point = match.end(2) - 2  # Before |}
-                new_content = "\n|-\n" + format_new_items(general_new) + "\n"
-                result = result[:insert_point] + new_content + result[insert_point:]
-            else:
-                # No General Loot section - need to create one or add to existing Reported Loot
-                loot_section = re.search(r'^==\s*Reported\s+Loot\s*==', result, re.MULTILINE | re.IGNORECASE)
-                if loot_section:
-                    # Add General Loot section after Reported Loot header
-                    insert_point = loot_section.end()
-                    new_section = "\n==== General Loot ====\n{|\n" + format_new_items(general_new) + "\n|}\n"
-                    result = result[:insert_point] + new_section + result[insert_point:]
-
-        # Insert into zone-specific sections
-        for zone, items in zone_new.items():
-            if not items:
+        for match in section_pattern.finditer(remaining_text):
+            if match.start() == 0:
+                # Skip the first match (Reported Loot itself)
                 continue
 
-            # Look for existing zone section
-            zone_pattern = re.compile(
-                rf'(====\s*\[\[{re.escape(zone)}\]\]\s*Loot\s*====.*?)(\|}})',
-                re.DOTALL | re.IGNORECASE
-            )
-            match = zone_pattern.search(result)
+            section_name = match.group(1).strip().lower()
+            if section_name not in loot_related_sections:
+                # Found a non-loot section - this is where loot content ends
+                end_of_loot = loot_start + match.start()
+                break
 
-            if match:
-                # Insert before the closing |}
-                insert_point = match.end(2) - 2
-                new_content = "\n|-\n" + format_new_items(items) + "\n"
-                result = result[:insert_point] + new_content + result[insert_point:]
-            else:
-                # No zone section exists - create one
-                # Find the end of the Reported Loot section to insert before it ends
-                loot_section = re.search(r'^==\s*Reported\s+Loot\s*==', result, re.MULTILINE | re.IGNORECASE)
-                if loot_section:
-                    # Find the next == section (end of Reported Loot)
-                    next_section = re.search(r'^==[^=]', result[loot_section.end():], re.MULTILINE)
-                    if next_section:
-                        insert_point = loot_section.end() + next_section.start()
-                    else:
-                        insert_point = len(result)
+        # Build the result: content before loot + new loot + content after loot
+        before_loot = wiki_text[:loot_start]
+        after_loot = wiki_text[end_of_loot:]
 
-                    new_section = f"\n==== [[{zone}]] Loot ====\n{{|}}\n" + format_new_items(items) + "\n|}\n"
-                    result = result[:insert_point] + new_section + result[insert_point:]
+        # Ensure proper spacing
+        result = before_loot.rstrip()
+        if result:
+            result += "\n\n"
+        result += new_loot_content.strip()
+        if after_loot.strip():
+            result += "\n\n" + after_loot.strip()
 
-        return result
+        return result + "\n"
