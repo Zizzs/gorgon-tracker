@@ -152,16 +152,6 @@ class LootParser:
     # Regex patterns for Player.log
     PLAYER_LOG_ZONE_PATTERN = re.compile(r'^\[(\d{2}:\d{2}:\d{2})\] LOADING LEVEL (.+)$')
 
-    # Pattern to match skinning/butchering in Player.log ProcessTalkScreen
-    # Example: [15:59:08] LocalPlayer: ProcessTalkScreen(2281134, "Search Corpse of Wild Pig",
-    #   "...Zizzs skinned the corpse (with a +8 skill bonus from equipment) and obtained Rough Animal Skin x2 plus Shoddy Animal Skin...")
-    # Note: DOTALL allows .*? to match across newlines since ProcessTalkScreen can span multiple lines
-    PLAYER_LOG_CORPSE_PATTERN = re.compile(
-        r'\[(\d{2}:\d{2}:\d{2})\] LocalPlayer: ProcessTalkScreen\((\d+), "Search Corpse of ([^"]+)".*?'
-        r'\w+ (skinned|butchered) the corpse.*?and obtained ([^"]+)"',
-        re.IGNORECASE | re.DOTALL
-    )
-
     # Pattern to extract timezone offset from chat log login line
     TIMEZONE_PATTERN = re.compile(r'Timezone Offset ([+-])(\d{2}):(\d{2}):(\d{2})')
 
@@ -557,9 +547,25 @@ class LootParser:
             except Exception as e:
                 print(f"Warning: Could not write loot history: {e}")
 
+    # Pattern to match start of ProcessTalkScreen with "Search Corpse of X"
+    # Example: [15:59:08] LocalPlayer: ProcessTalkScreen(2281134, "Search Corpse of Wild Pig",
+    CORPSE_SEARCH_START_PATTERN = re.compile(
+        r'\[(\d{2}:\d{2}:\d{2})\] LocalPlayer: ProcessTalkScreen\((\d+), "Search Corpse of ([^"]+)"'
+    )
+
+    # Pattern to match skinning/butchering result with items obtained
+    # Example: Zizzs skinned the corpse (with a +8 skill bonus from equipment) and obtained Rough Animal Skin x2 plus Shoddy Animal Skin"
+    CORPSE_ACTION_RESULT_PATTERN = re.compile(
+        r'\w+ (skinned|butchered) the corpse.*?and obtained ([^"]+)"',
+        re.IGNORECASE
+    )
+
     def _update_corpse_action_history(self, action_type: str, history_filename: str):
         """
         Parse Player.log for skinning/butchering events and append to persistent history.
+
+        Uses line-by-line processing with state tracking to avoid catastrophic regex
+        backtracking on large files (Player.log can be 70MB+).
 
         Args:
             action_type: "skinned" or "butchered"
@@ -586,33 +592,61 @@ class LootParser:
         except (OSError, ValueError):
             log_date = datetime.now().strftime("%Y-%m-%d")
 
-        # Read current Player.log and find corpse action entries
+        # Process line-by-line with state tracking
+        # ProcessTalkScreen can span multiple lines, so we track state across lines
         new_entries = []
+        pending_corpse = None  # (time_str, entity_id, creature)
+        pending_text = ""  # Accumulated text for current ProcessTalkScreen
+
         try:
             with open(self.player_log_path, 'r', encoding='utf-8', errors='replace') as f:
-                content = f.read()
-                # ProcessTalkScreen can span multiple lines, so we need to search the whole content
-                for match in self.PLAYER_LOG_CORPSE_PATTERN.finditer(content):
-                    time_str, entity_id, creature, action, items_str = match.groups()
-
-                    # Only process entries matching our action type
-                    if action.lower() != action_type:
+                for line in f:
+                    # Check for start of a new ProcessTalkScreen with "Search Corpse"
+                    corpse_match = self.CORPSE_SEARCH_START_PATTERN.search(line)
+                    if corpse_match:
+                        # Start tracking a new potential corpse action
+                        pending_corpse = corpse_match.groups()
+                        pending_text = line[corpse_match.start():]
                         continue
 
-                    # Parse items: "Rough Animal Skin x2 plus Shoddy Animal Skin"
-                    # Items are separated by " plus "
-                    items = self._parse_corpse_items(items_str)
+                    # If we're tracking a corpse search, accumulate text
+                    if pending_corpse:
+                        # Check if a new log entry starts (new timestamp = new entry)
+                        if line.startswith('[') and '] ' in line[:15]:
+                            # New log entry started, reset tracking
+                            pending_corpse = None
+                            pending_text = ""
+                        else:
+                            # Continuation of ProcessTalkScreen, accumulate text
+                            pending_text += line
 
-                    # Convert UTC time from Player.log to local time
-                    local_time_str, local_date = self._convert_utc_to_local_time(time_str, log_date)
+                        # Look for the skinning/butchering result in accumulated text
+                        action_match = self.CORPSE_ACTION_RESULT_PATTERN.search(pending_text)
+                        if action_match:
+                            action, items_str = action_match.groups()
 
-                    # Format: YYYY-MM-DD HH:MM:SS|entity_id|creature|item1,item2,...
-                    items_formatted = ",".join(f"{name}:{count}" for name, count in items)
-                    entry = f"{local_date} {local_time_str}|{entity_id}|{creature}|{items_formatted}"
+                            # Only process entries matching our action type
+                            if action.lower() == action_type:
+                                time_str, entity_id, creature = pending_corpse
 
-                    if entry not in existing_entries:
-                        new_entries.append(entry)
-                        existing_entries.add(entry)
+                                # Parse items: "Rough Animal Skin x2 plus Shoddy Animal Skin"
+                                items = self._parse_corpse_items(items_str)
+
+                                # Convert UTC time from Player.log to local time
+                                local_time_str, local_date = self._convert_utc_to_local_time(time_str, log_date)
+
+                                # Format: YYYY-MM-DD HH:MM:SS|entity_id|creature|item1,item2,...
+                                items_formatted = ",".join(f"{name}:{count}" for name, count in items)
+                                entry = f"{local_date} {local_time_str}|{entity_id}|{creature}|{items_formatted}"
+
+                                if entry not in existing_entries:
+                                    new_entries.append(entry)
+                                    existing_entries.add(entry)
+
+                            # Reset tracking after processing
+                            pending_corpse = None
+                            pending_text = ""
+
         except Exception as e:
             print(f"Warning: Could not read Player.log for {action_type}: {e}")
             return
