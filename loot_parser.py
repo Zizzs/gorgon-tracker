@@ -295,6 +295,46 @@ class LootParser:
         except Exception as e:
             print(f"Warning: Could not mirror {source_path.name}: {e}")
 
+    def _get_system_timezone_offset_hours(self) -> float:
+        """Get the system's local timezone offset from UTC in hours."""
+        from datetime import timezone
+        local_offset = datetime.now(timezone.utc).astimezone().utcoffset()
+        return local_offset.total_seconds() / 3600
+
+    def _convert_utc_to_local_time(self, time_str: str, base_date: str) -> tuple[str, str]:
+        """
+        Convert a UTC time string to local time, handling date rollover.
+
+        Args:
+            time_str: Time in "HH:MM:SS" format (UTC from Player.log)
+            base_date: Date in "YYYY-MM-DD" format
+
+        Returns:
+            Tuple of (local_time_str, adjusted_date_str)
+        """
+        offset_hours = self._get_system_timezone_offset_hours()
+        utc_hour = int(time_str[:2])
+        local_hour = utc_hour + offset_hours
+
+        # Handle date adjustment if crossing midnight
+        date_adjustment = 0
+        if local_hour < 0:
+            local_hour += 24
+            date_adjustment = -1
+        elif local_hour >= 24:
+            local_hour -= 24
+            date_adjustment = 1
+
+        # Adjust the date if needed
+        if date_adjustment != 0:
+            adjusted_date = datetime.strptime(base_date, "%Y-%m-%d") + timedelta(days=date_adjustment)
+            result_date = adjusted_date.strftime("%Y-%m-%d")
+        else:
+            result_date = base_date
+
+        local_time_str = f"{int(local_hour):02d}{time_str[2:]}"  # Replace hour, keep :MM:SS
+        return local_time_str, result_date
+
     def _update_zone_history(self):
         """Append new zone transitions from Player.log to persistent history."""
         if not self.player_log_path.exists():
@@ -330,7 +370,9 @@ class LootParser:
                         zone_name = ZONE_NAMES.get(zone_internal, zone_internal)
                         if zone_name is None:  # Skip non-zones like ChooseCharacter
                             continue
-                        entry = f"{log_date} {time_str} {zone_name}"
+                        # Convert UTC time from Player.log to local time
+                        local_time_str, local_date = self._convert_utc_to_local_time(time_str, log_date)
+                        entry = f"{local_date} {local_time_str} {zone_name}"
                         if entry not in existing_entries:
                             new_entries.append(entry)
                             existing_entries.add(entry)
@@ -561,9 +603,12 @@ class LootParser:
                     # Items are separated by " plus "
                     items = self._parse_corpse_items(items_str)
 
+                    # Convert UTC time from Player.log to local time
+                    local_time_str, local_date = self._convert_utc_to_local_time(time_str, log_date)
+
                     # Format: YYYY-MM-DD HH:MM:SS|entity_id|creature|item1,item2,...
                     items_formatted = ",".join(f"{name}:{count}" for name, count in items)
-                    entry = f"{log_date} {time_str}|{entity_id}|{creature}|{items_formatted}"
+                    entry = f"{local_date} {local_time_str}|{entity_id}|{creature}|{items_formatted}"
 
                     if entry not in existing_entries:
                         new_entries.append(entry)
@@ -745,10 +790,13 @@ class LootParser:
                         if zone_name is None:
                             continue
 
-                        # Parse time and combine with reference date
+                        # Convert UTC time from Player.log to local time
                         try:
-                            time_parts = time_str.split(':')
-                            zone_time = reference_date.replace(
+                            base_date = reference_date.strftime("%Y-%m-%d")
+                            local_time_str, local_date = self._convert_utc_to_local_time(time_str, base_date)
+                            time_parts = local_time_str.split(':')
+                            local_datetime = datetime.strptime(local_date, "%Y-%m-%d")
+                            zone_time = local_datetime.replace(
                                 hour=int(time_parts[0]),
                                 minute=int(time_parts[1]),
                                 second=int(time_parts[2])
