@@ -458,6 +458,20 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             ('Dark.Treeview.treearea', {'sticky': 'nswe'})
         ])
 
+        # Configure Scrollbar to match dark theme
+        style.configure(
+            "Dark.Vertical.TScrollbar",
+            background="#3d3d3d",
+            troughcolor="#2b2b2b",
+            bordercolor="#2b2b2b",
+            arrowcolor="#DCE4EE",
+            relief="flat"
+        )
+        style.map(
+            "Dark.Vertical.TScrollbar",
+            background=[("active", "#505050"), ("pressed", "#606060")]
+        )
+
     def _create_widgets(self):
         """Create the main UI layout."""
         if self.parser is None:
@@ -859,12 +873,12 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.storage_tree.tag_configure("epic", foreground="#9C27B0")
         self.storage_tree.tag_configure("legendary", foreground="#FF9800")
 
-        # Scrollbar
-        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.storage_tree.yview)
+        # CTk Scrollbar (matches other scrollbars in the app)
+        scrollbar = ctk.CTkScrollbar(tree_frame, orientation="vertical", command=self.storage_tree.yview)
         self.storage_tree.configure(yscrollcommand=scrollbar.set)
 
         self.storage_tree.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        scrollbar.pack(side="right", fill="y", padx=(0, 2), pady=2)
 
     def _sort_storage(self, column: str):
         """Sort storage treeview by column, toggling ascending/descending."""
@@ -955,12 +969,12 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.quests_tree.tag_configure("incomplete", foreground="#F44336")  # Red - item objective missing
         self.quests_tree.tag_configure("other", foreground="#9E9E9E")  # Gray - non-item objectives
 
-        # Scrollbar
-        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.quests_tree.yview)
+        # CTk Scrollbar (matches other scrollbars in the app)
+        scrollbar = ctk.CTkScrollbar(tree_frame, orientation="vertical", command=self.quests_tree.yview)
         self.quests_tree.configure(yscrollcommand=scrollbar.set)
 
         self.quests_tree.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        scrollbar.pack(side="right", fill="y", padx=(0, 2), pady=2)
 
         # Double-click to open wiki page
         self.quests_tree.bind("<Double-1>", self._on_quest_double_click)
