@@ -8,17 +8,16 @@ The wiki sync system helps you contribute loot data to the [Project Gorgon Wiki]
 
 ### How Wiki Sync Works
 
-1. **Generate Wiki Table** - Select a creature and click "Copy Wiki" to get a wiki-formatted loot table with:
+1. **Generate Wiki Table** - Select a creature and click "Edit" at the top and copy the provided wiki page content
    - Zone-aware sections (items organized by zone)
    - Skinning and Butchering results in separate sections
    - Proper wiki syntax with item links
 
-2. **Paste Existing Wiki Content** - If the creature already has a wiki page with loot data:
-   - Click "Paste Wiki"
+2. **Paste Existing Wiki Content** - Select a creature in Gorgon Tracker, and click the "Wiki" button in the "Loot Details" window
    - Paste the existing wiki table content
    - The parser extracts all currently-listed items
 
-3. **Merge Data** - Click "Merge" to combine:
+3. **Sync Data** - Click "Sync" to merge your collected data with the wiki data
    - Your tracked drops are added to the wiki data
    - Existing wiki items are preserved
    - Duplicates are automatically handled
