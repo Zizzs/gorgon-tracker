@@ -328,6 +328,8 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     self.last_update_timestamp = settings.get("last_update_timestamp", None)
                     self.debug_zone_editing = settings.get("debug_zone_editing", False)
                     self.debug_logging = settings.get("debug_logging", False)
+                    self.zone_expanded = settings.get("zone_expanded", {})
+                    self.section_expanded = settings.get("section_expanded", {"skills": False, "npcs": False})
             except (json.JSONDecodeError, IOError):
                 pass
 
@@ -358,7 +360,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             "auto_update_interval": self.auto_update_interval,
             "last_update_timestamp": self.last_update_timestamp,
             "debug_zone_editing": self.debug_zone_editing,
-            "debug_logging": self.debug_logging
+            "debug_logging": self.debug_logging,
+            "zone_expanded": getattr(self, 'zone_expanded', {}),
+            "section_expanded": getattr(self, 'section_expanded', {"skills": False, "npcs": False})
         }
         try:
             with open(SETTINGS_FILE, 'w') as f:
@@ -772,12 +776,14 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.npcs_content = ctk.CTkFrame(self.character_scroll, fg_color="transparent")
         self.npcs_content.pack(fill="x", padx=5, pady=(0, 10))
 
-        # Section expanded states
-        self.section_expanded = {"skills": True, "npcs": True}
+        # Section expanded states (only set default if not loaded from settings)
+        if not hasattr(self, 'section_expanded'):
+            self.section_expanded = {"skills": False, "npcs": False}
 
     def _toggle_section(self, section: str):
         """Toggle collapsible section."""
-        self.section_expanded[section] = not self.section_expanded.get(section, True)
+        self.section_expanded[section] = not self.section_expanded.get(section, False)
+        self._save_settings()
         self._refresh_character_tab()
 
     def _create_storage_tab(self):
@@ -2759,9 +2765,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 reverse=True
             )
 
-            # Default to expanded
+            # Default to collapsed
             if zone not in self.zone_expanded:
-                self.zone_expanded[zone] = True
+                self.zone_expanded[zone] = False
 
             # Create zone header
             header_frame = ctk.CTkFrame(self.creature_scroll, fg_color="transparent", height=28)
@@ -2820,7 +2826,8 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _toggle_zone(self, zone: str):
         """Toggle zone section expanded/collapsed state."""
-        self.zone_expanded[zone] = not self.zone_expanded.get(zone, True)
+        self.zone_expanded[zone] = not self.zone_expanded.get(zone, False)
+        self._save_settings()
         self._refresh_creature_list()
 
     def _clear_search(self):
