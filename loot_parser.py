@@ -45,6 +45,7 @@ ZONE_NAMES = {
     "AreaGazlukKeep": "Gazluk Keep",
     "AreaGazlukPlateau": "Gazluk Plateau",
     "AreaIlmari": "Ilmari",
+    "AreaDesert2": "Phantom Ilmari Desert",
     "AreaRahuSewers": "Rahu Sewer",
     "AreaRahu": "Rahu",
     "AreaDesertTown": "Amulna",
