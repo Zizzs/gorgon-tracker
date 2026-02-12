@@ -50,6 +50,13 @@ The wiki sync system helps you contribute loot data to the [Project Gorgon Wiki]
 - **Sortable by completion** - click Status column to sort ready quests to top
 - **Wiki links** - double-click any quest to open its wiki page
 
+### Shop Tracking
+- **Sales summary** - Track all items sold through your player vendor
+- **Revenue tracking** - Total revenue and average prices per item
+- **Inventory view** - Current shop items, prices, and visibility
+- **Activity log** - Full history of shop events (sales, collections, inventory changes)
+- **Sortable columns** - Sort by item name, quantity sold, revenue, or average price
+
 ### Character & Storage
 - **Character tab** - view your character's skills and levels
 - **Storage tab** - searchable inventory across all vault locations
@@ -99,6 +106,7 @@ Gorgon Tracker reads the game's chat log files and character data:
 
 2. **Player.log** - Located in `%LOCALAPPDATA%Low\Elder Game\Project Gorgon\`
    - Reads zone transitions to track your current location
+   - Parses shop activity for sales, inventory, and council collections
 
 3. **Character Reports** - JSON files containing character data
    - Skills, inventory, quest progress, storage contents
