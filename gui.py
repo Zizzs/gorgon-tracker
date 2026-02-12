@@ -21,6 +21,7 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 from loot_parser import LootParser, ZONE_NAMES
 from paths import get_gorgon_tracker_data_dir, get_pg_chatlog_dir
 from reports_parser import ReportsParser, FAVOR_DISPLAY, FAVOR_LEVELS
+from shop_parser import ShopParser
 
 # Application version - used for update checking
 __version__ = "1.0.0"
@@ -284,6 +285,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # Reports parser for character/storage/quests
         self.reports_parser = ReportsParser()
+
+        # Shop parser for player shop logs
+        self.shop_parser = ShopParser()
 
         # Thread synchronization for shared data
         self._data_lock = threading.Lock()
@@ -626,13 +630,14 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.left_tabview.add("Creatures")
         self.left_tabview.add("Character")
         self.left_tabview.add("Storage")
+        self.left_tabview.add("Shop")
         self.left_tabview.add("Quests")
 
         # Set default tab
         self.left_tabview.set("Creatures")
 
         # Track which tabs have been populated (lazy loading)
-        self._tabs_populated = {"Creatures": False, "Character": False, "Storage": False, "Quests": False}
+        self._tabs_populated = {"Creatures": False, "Character": False, "Storage": False, "Shop": False, "Quests": False}
 
         # Bind tab change event
         self.left_tabview.configure(command=self._on_tab_changed)
@@ -641,6 +646,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._create_creatures_tab()
         self._create_character_tab()
         self._create_storage_tab()
+        self._create_shop_tab()
         self._create_quests_tab()
 
     def _on_tab_changed(self):
@@ -654,6 +660,8 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._refresh_character_tab()
             elif self.current_left_tab == "Storage":
                 self._refresh_storage_tab()
+            elif self.current_left_tab == "Shop":
+                self._refresh_shop_tab()
             elif self.current_left_tab == "Quests":
                 self._refresh_quests_tab()
 
@@ -932,6 +940,441 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.selected_vault = value
         self._refresh_storage_tab()
 
+    def _create_shop_tab(self):
+        """Create the Shop tab content."""
+        tab = self.left_tabview.tab("Shop")
+
+        # View selector
+        view_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        view_frame.pack(fill="x", padx=5, pady=(5, 5))
+
+        ctk.CTkLabel(
+            view_frame,
+            text="View:",
+            font=ctk.CTkFont(size=12)
+        ).pack(side="left")
+
+        self.shop_view_var = ctk.StringVar(value="Sales")
+        self.shop_view_dropdown = ctk.CTkOptionMenu(
+            view_frame,
+            values=["Sales", "Inventory", "Raw Logs"],
+            variable=self.shop_view_var,
+            width=120,
+            height=28,
+            command=self._on_shop_view_changed
+        )
+        self.shop_view_dropdown.pack(side="left", padx=(5, 0))
+
+        # Summary row
+        self.shop_summary = ctk.CTkLabel(
+            tab,
+            text="No shop data",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        self.shop_summary.pack(anchor="w", padx=10, pady=(0, 5))
+
+        # Use Treeview for the main display
+        tree_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Create treeview with columns for Sales view (default)
+        columns = ("item", "sold", "revenue", "avg")
+        self.shop_tree = ttk.Treeview(
+            tree_frame,
+            columns=columns,
+            show="headings",
+            style="Dark.Treeview"
+        )
+
+        # Sort state
+        self.shop_sort_state = {"item": True, "sold": True, "revenue": False, "avg": True}
+        self.shop_sort_column = "revenue"
+
+        # Raw logs pagination state
+        self.raw_logs_page = 1
+        self.raw_logs_page_size = 100
+        self.raw_logs_newest_first = True
+        self.raw_logs_total = 0
+
+        # Column headings
+        self.shop_tree.heading("item", text="Item", anchor="w",
+                               command=lambda: self._sort_shop("item"))
+        self.shop_tree.heading("sold", text="Sold", anchor="center",
+                               command=lambda: self._sort_shop("sold"))
+        self.shop_tree.heading("revenue", text="Revenue \u25bc", anchor="center",
+                               command=lambda: self._sort_shop("revenue"))
+        self.shop_tree.heading("avg", text="Avg", anchor="center",
+                               command=lambda: self._sort_shop("avg"))
+
+        self.shop_tree.column("item", width=140, minwidth=100, anchor="w")
+        self.shop_tree.column("sold", width=50, minwidth=40, anchor="center")
+        self.shop_tree.column("revenue", width=70, minwidth=50, anchor="center")
+        self.shop_tree.column("avg", width=50, minwidth=40, anchor="center")
+
+        # CTk Scrollbar
+        scrollbar = ctk.CTkScrollbar(tree_frame, orientation="vertical", command=self.shop_tree.yview)
+        self.shop_tree.configure(yscrollcommand=scrollbar.set)
+
+        self.shop_tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y", padx=(0, 2), pady=2)
+
+        # Bind selection for detail panel
+        self.shop_tree.bind("<<TreeviewSelect>>", self._on_shop_item_selected)
+
+    def _on_shop_view_changed(self, value):
+        """Handle shop view dropdown change."""
+        self._refresh_shop_tab()
+
+    def _refresh_shop_tab(self):
+        """Refresh the Shop tab content."""
+        if not hasattr(self, 'shop_tree'):
+            return
+
+        # Parse latest data from Player.log
+        self.shop_parser.parse_player_log()
+
+        # Get current view
+        view = self.shop_view_var.get()
+
+        if view == "Sales":
+            self._display_shop_sales()
+        elif view == "Inventory":
+            self._display_shop_inventory()
+        elif view == "Raw Logs":
+            self._display_shop_raw_logs()
+
+    def _display_shop_sales(self):
+        """Display sales summary in the shop tree."""
+        # Hide raw logs controls if visible
+        self._hide_raw_logs_controls()
+
+        # Clear and reconfigure tree for sales view
+        self.shop_tree.delete(*self.shop_tree.get_children())
+
+        # Configure columns for sales
+        self.shop_tree["columns"] = ("item", "sold", "revenue", "avg")
+        self.shop_tree.heading("item", text="Item", anchor="w",
+                               command=lambda: self._sort_shop("item"))
+        self.shop_tree.heading("sold", text="Sold", anchor="center",
+                               command=lambda: self._sort_shop("sold"))
+        self.shop_tree.heading("revenue", text="Revenue", anchor="center",
+                               command=lambda: self._sort_shop("revenue"))
+        self.shop_tree.heading("avg", text="Avg", anchor="center",
+                               command=lambda: self._sort_shop("avg"))
+
+        self.shop_tree.column("item", width=140, minwidth=100, anchor="w")
+        self.shop_tree.column("sold", width=50, minwidth=40, anchor="center")
+        self.shop_tree.column("revenue", width=70, minwidth=50, anchor="center")
+        self.shop_tree.column("avg", width=50, minwidth=40, anchor="center")
+
+        # Get sales data
+        sales = self.shop_parser.get_sales_summary()
+        totals = self.shop_parser.get_totals()
+
+        if not sales:
+            self.shop_summary.configure(text="No sales data - view shop logs in-game")
+            return
+
+        # Update summary
+        self.shop_summary.configure(
+            text=f"{totals['items']} items - {totals['sold']:,} sold - {totals['revenue']:,} councils"
+        )
+
+        # Insert sales data
+        for sale in sales:
+            self.shop_tree.insert(
+                "", "end",
+                values=(
+                    sale["item"],
+                    f"{sale['total_sold']:,}",
+                    f"{sale['total_revenue']:,}",
+                    f"{sale['avg_price']:.0f}"
+                ),
+                tags=(sale["item"],)  # Store item name for detail lookup
+            )
+
+        # Apply sort indicator
+        self._update_shop_sort_indicator()
+
+    def _display_shop_inventory(self):
+        """Display current inventory in the shop tree."""
+        # Hide raw logs controls if visible
+        self._hide_raw_logs_controls()
+
+        # Clear and reconfigure tree for inventory view
+        self.shop_tree.delete(*self.shop_tree.get_children())
+
+        # Configure columns for inventory
+        self.shop_tree["columns"] = ("item", "qty", "price", "visible")
+        self.shop_tree.heading("item", text="Item", anchor="w",
+                               command=lambda: self._sort_shop("item"))
+        self.shop_tree.heading("qty", text="Qty", anchor="center",
+                               command=lambda: self._sort_shop("qty"))
+        self.shop_tree.heading("price", text="Price", anchor="center",
+                               command=lambda: self._sort_shop("price"))
+        self.shop_tree.heading("visible", text="Visible", anchor="center",
+                               command=lambda: self._sort_shop("visible"))
+
+        self.shop_tree.column("item", width=140, minwidth=100, anchor="w")
+        self.shop_tree.column("qty", width=50, minwidth=40, anchor="center")
+        self.shop_tree.column("price", width=60, minwidth=40, anchor="center")
+        self.shop_tree.column("visible", width=50, minwidth=40, anchor="center")
+
+        # Get inventory data
+        inventory = self.shop_parser.get_current_inventory()
+
+        if not inventory:
+            self.shop_summary.configure(text="No inventory data")
+            return
+
+        # Update summary
+        total_qty = sum(i["quantity"] for i in inventory)
+        self.shop_summary.configure(
+            text=f"{len(inventory)} items - {total_qty:,} total quantity"
+        )
+
+        # Insert inventory data
+        for item in inventory:
+            price_str = f"{item['price']:,}" if item["price"] else "-"
+            visible_str = "\u2713" if item["visible"] else "\u2717"
+
+            self.shop_tree.insert(
+                "", "end",
+                values=(
+                    item["item"],
+                    f"{item['quantity']:,}",
+                    price_str,
+                    visible_str
+                )
+            )
+
+    def _display_shop_raw_logs(self):
+        """Display raw log entries in the shop tree with pagination."""
+        # Clear and reconfigure tree for raw logs view
+        self.shop_tree.delete(*self.shop_tree.get_children())
+
+        # Configure columns for raw logs - single column
+        self.shop_tree["columns"] = ("entry",)
+        self.shop_tree.heading("entry", text="Log Entry", anchor="w")
+        self.shop_tree.column("entry", width=300, minwidth=200, anchor="w")
+
+        # Get raw logs with pagination
+        logs, total = self.shop_parser.get_raw_logs(
+            page=self.raw_logs_page,
+            page_size=self.raw_logs_page_size,
+            newest_first=self.raw_logs_newest_first
+        )
+        self.raw_logs_total = total
+
+        if not logs and total == 0:
+            self.shop_summary.configure(text="No log entries")
+            self._hide_raw_logs_controls()
+            return
+
+        # Calculate pagination info
+        total_pages = (total + self.raw_logs_page_size - 1) // self.raw_logs_page_size
+        if total_pages == 0:
+            total_pages = 1
+
+        # Clamp current page
+        if self.raw_logs_page > total_pages:
+            self.raw_logs_page = total_pages
+
+        # Update summary with pagination info
+        start_idx = (self.raw_logs_page - 1) * self.raw_logs_page_size + 1
+        end_idx = min(self.raw_logs_page * self.raw_logs_page_size, total)
+        sort_order = "Newest first" if self.raw_logs_newest_first else "Oldest first"
+        self.shop_summary.configure(
+            text=f"{total:,} entries - Showing {start_idx}-{end_idx} - {sort_order}"
+        )
+
+        # Show pagination controls
+        self._show_raw_logs_controls(total_pages)
+
+        # Insert log entries
+        for log in logs:
+            self.shop_tree.insert(
+                "", "end",
+                values=(log.get("raw", ""),)
+            )
+
+    def _show_raw_logs_controls(self, total_pages: int):
+        """Show pagination controls for raw logs."""
+        # Create controls frame if it doesn't exist
+        if not hasattr(self, 'raw_logs_controls'):
+            tab = self.left_tabview.tab("Shop")
+
+            self.raw_logs_controls = ctk.CTkFrame(tab, fg_color="transparent")
+
+            # Sort toggle button
+            self.raw_logs_sort_btn = ctk.CTkButton(
+                self.raw_logs_controls,
+                text="Sort: Newest",
+                command=self._toggle_raw_logs_sort,
+                width=100,
+                height=26,
+                font=ctk.CTkFont(size=11)
+            )
+            self.raw_logs_sort_btn.pack(side="left", padx=(0, 10))
+
+            # Previous button
+            self.raw_logs_prev_btn = ctk.CTkButton(
+                self.raw_logs_controls,
+                text="< Prev",
+                command=self._raw_logs_prev_page,
+                width=60,
+                height=26,
+                font=ctk.CTkFont(size=11)
+            )
+            self.raw_logs_prev_btn.pack(side="left")
+
+            # Page indicator
+            self.raw_logs_page_label = ctk.CTkLabel(
+                self.raw_logs_controls,
+                text="Page 1 of 1",
+                font=ctk.CTkFont(size=11)
+            )
+            self.raw_logs_page_label.pack(side="left", padx=10)
+
+            # Next button
+            self.raw_logs_next_btn = ctk.CTkButton(
+                self.raw_logs_controls,
+                text="Next >",
+                command=self._raw_logs_next_page,
+                width=60,
+                height=26,
+                font=ctk.CTkFont(size=11)
+            )
+            self.raw_logs_next_btn.pack(side="left")
+
+        # Update controls state
+        self.raw_logs_page_label.configure(text=f"Page {self.raw_logs_page} of {total_pages}")
+        self.raw_logs_prev_btn.configure(state="normal" if self.raw_logs_page > 1 else "disabled")
+        self.raw_logs_next_btn.configure(state="normal" if self.raw_logs_page < total_pages else "disabled")
+
+        sort_text = "Sort: Newest" if self.raw_logs_newest_first else "Sort: Oldest"
+        self.raw_logs_sort_btn.configure(text=sort_text)
+
+        # Pack the controls frame below the tree
+        self.raw_logs_controls.pack(fill="x", padx=5, pady=(0, 5))
+
+    def _hide_raw_logs_controls(self):
+        """Hide pagination controls for raw logs."""
+        if hasattr(self, 'raw_logs_controls'):
+            self.raw_logs_controls.pack_forget()
+
+    def _toggle_raw_logs_sort(self):
+        """Toggle raw logs sort order."""
+        self.raw_logs_newest_first = not self.raw_logs_newest_first
+        self.raw_logs_page = 1  # Reset to first page
+        self._display_shop_raw_logs()
+
+    def _raw_logs_prev_page(self):
+        """Go to previous page of raw logs."""
+        if self.raw_logs_page > 1:
+            self.raw_logs_page -= 1
+            self._display_shop_raw_logs()
+
+    def _raw_logs_next_page(self):
+        """Go to next page of raw logs."""
+        total_pages = (self.raw_logs_total + self.raw_logs_page_size - 1) // self.raw_logs_page_size
+        if self.raw_logs_page < total_pages:
+            self.raw_logs_page += 1
+            self._display_shop_raw_logs()
+
+    def _sort_shop(self, column: str):
+        """Sort shop treeview by column."""
+        view = self.shop_view_var.get()
+
+        # Toggle sort direction
+        if self.shop_sort_column == column:
+            self.shop_sort_state[column] = not self.shop_sort_state.get(column, True)
+        else:
+            self.shop_sort_state[column] = True
+            self.shop_sort_column = column
+
+        ascending = self.shop_sort_state[column]
+
+        # Get all items
+        items = []
+        for item_id in self.shop_tree.get_children():
+            values = self.shop_tree.item(item_id, "values")
+            tags = self.shop_tree.item(item_id, "tags")
+            items.append((item_id, values, tags))
+
+        # Determine column index and sort type based on view
+        if view == "Sales":
+            col_map = {"item": 0, "sold": 1, "revenue": 2, "avg": 3}
+            numeric_cols = {"sold", "revenue", "avg"}
+        elif view == "Inventory":
+            col_map = {"item": 0, "qty": 1, "price": 2, "visible": 3}
+            numeric_cols = {"qty", "price"}
+        else:
+            return  # No sorting for raw logs
+
+        col_idx = col_map.get(column, 0)
+
+        # Sort
+        if column in numeric_cols:
+            # Parse numeric values (remove commas, handle dashes)
+            def parse_num(val):
+                val = val.replace(",", "").replace("-", "0")
+                try:
+                    return float(val)
+                except ValueError:
+                    return 0
+            items.sort(key=lambda x: parse_num(x[1][col_idx]), reverse=not ascending)
+        else:
+            items.sort(key=lambda x: x[1][col_idx].lower(), reverse=not ascending)
+
+        # Reorder items
+        for idx, (item_id, values, tags) in enumerate(items):
+            self.shop_tree.move(item_id, "", idx)
+
+        self._update_shop_sort_indicator()
+
+    def _update_shop_sort_indicator(self):
+        """Update sort indicator arrows on shop tree headers."""
+        view = self.shop_view_var.get()
+        column = self.shop_sort_column
+        ascending = self.shop_sort_state.get(column, True)
+        arrow = " \u25b2" if ascending else " \u25bc"
+
+        if view == "Sales":
+            headers = {"item": "Item", "sold": "Sold", "revenue": "Revenue", "avg": "Avg"}
+        elif view == "Inventory":
+            headers = {"item": "Item", "qty": "Qty", "price": "Price", "visible": "Visible"}
+        else:
+            return
+
+        for col, text in headers.items():
+            if col == column:
+                self.shop_tree.heading(col, text=text + arrow)
+            else:
+                self.shop_tree.heading(col, text=text)
+
+    def _on_shop_item_selected(self, event):
+        """Handle shop item selection to show details."""
+        selection = self.shop_tree.selection()
+        if not selection:
+            return
+
+        view = self.shop_view_var.get()
+        if view != "Sales":
+            return  # Only show details for sales view
+
+        item_id = selection[0]
+        tags = self.shop_tree.item(item_id, "tags")
+
+        if not tags:
+            return
+
+        item_name = tags[0]
+
+        # Show the shop detail panel with individual sales
+        self._show_shop_detail_panel(item_name)
+
     def _create_quests_tab(self):
         """Create the Quests tab content."""
         tab = self.left_tabview.tab("Quests")
@@ -1000,6 +1443,8 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._refresh_character_tab()
         elif self.current_left_tab == "Storage":
             self._refresh_storage_tab()
+        elif self.current_left_tab == "Shop":
+            self._refresh_shop_tab()
         elif self.current_left_tab == "Quests":
             self._refresh_quests_tab()
         # Creatures tab is handled by _refresh_creature_list()
@@ -1497,6 +1942,7 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._create_loot_detail_view()
         self._create_options_view()
         self._create_stats_view()
+        self._create_shop_detail_view()
 
         # Show detail panel on top initially
         self.detail_content.tkraise()
@@ -2039,6 +2485,36 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.zone_history_status.pack(side="left", padx=10)
 
+        # Clear Shop Data
+        ctk.CTkLabel(
+            data_frame,
+            text="Clear all shop sales and log data",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", padx=15, pady=(0, 10))
+
+        shop_data_frame = ctk.CTkFrame(data_frame, fg_color="transparent")
+        shop_data_frame.pack(fill="x", padx=15, pady=(0, 15))
+
+        self.clear_shop_data_button = ctk.CTkButton(
+            shop_data_frame,
+            text="Clear Shop Data",
+            command=self._clear_shop_data,
+            width=150,
+            height=32,
+            fg_color="#ff9800",
+            hover_color="#f57c00",
+            font=ctk.CTkFont(size=13)
+        )
+        self.clear_shop_data_button.pack(side="left")
+
+        self.shop_data_status = ctk.CTkLabel(
+            shop_data_frame,
+            text="",
+            font=ctk.CTkFont(size=11)
+        )
+        self.shop_data_status.pack(side="left", padx=10)
+
         # Developer Options section
         dev_frame = ctk.CTkFrame(self.options_scroll)
         dev_frame.pack(fill="x", padx=10, pady=10)
@@ -2112,6 +2588,113 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             text_color="#4CAF50"
         )
         self.save_status.pack(side="left", padx=15)
+
+    def _create_shop_detail_view(self):
+        """Create the shop item detail view."""
+        self.shop_detail_content = ctk.CTkFrame(self.right_frame)
+        self.shop_detail_content.grid(row=0, column=0, sticky="nsew")
+
+        # Header
+        self.shop_detail_header = ctk.CTkFrame(self.shop_detail_content, fg_color="transparent")
+        self.shop_detail_header.pack(fill="x", padx=10, pady=(10, 5))
+
+        self.shop_detail_name = ctk.CTkLabel(
+            self.shop_detail_header,
+            text="Item Sales",
+            font=ctk.CTkFont(size=16, weight="bold")
+        )
+        self.shop_detail_name.pack(anchor="w")
+
+        self.shop_detail_summary = ctk.CTkLabel(
+            self.shop_detail_header,
+            text="",
+            font=ctk.CTkFont(size=12),
+            text_color="gray"
+        )
+        self.shop_detail_summary.pack(anchor="w")
+
+        # Scrollable sales list
+        self.shop_sales_scroll = ctk.CTkScrollableFrame(self.shop_detail_content)
+        self.shop_sales_scroll.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Container for individual sales
+        self.shop_sales_list = ctk.CTkFrame(self.shop_sales_scroll, fg_color="transparent")
+        self.shop_sales_list.pack(fill="x", expand=True)
+
+    def _show_shop_detail_panel(self, item_name: str):
+        """Show the shop detail panel with sales for a specific item."""
+        # Clear previous sales
+        for widget in self.shop_sales_list.winfo_children():
+            widget.destroy()
+
+        # Get sales for this item
+        sales = self.shop_parser.get_sales_for_item(item_name)
+
+        if not sales:
+            self.shop_detail_name.configure(text=item_name)
+            self.shop_detail_summary.configure(text="No individual sales found")
+            self.shop_detail_content.tkraise()
+            return
+
+        # Update header
+        total_sold = sum(s["data"]["quantity"] for s in sales)
+        total_revenue = sum(s["data"]["total"] for s in sales)
+        self.shop_detail_name.configure(text=item_name)
+        self.shop_detail_summary.configure(
+            text=f"{len(sales)} sales - {total_sold:,} total sold - {total_revenue:,} councils"
+        )
+
+        # Display each sale on a single line
+        for sale in sales:
+            data = sale["data"]
+            timestamp = sale.get("timestamp", "Unknown")
+
+            sale_frame = ctk.CTkFrame(self.shop_sales_list)
+            sale_frame.pack(fill="x", pady=1)
+
+            row = ctk.CTkFrame(sale_frame, fg_color="transparent")
+            row.pack(fill="x", padx=8, pady=4)
+
+            # Timestamp
+            ctk.CTkLabel(
+                row,
+                text=timestamp,
+                font=ctk.CTkFont(size=11),
+                text_color="gray"
+            ).pack(side="left")
+
+            # Buyer
+            ctk.CTkLabel(
+                row,
+                text=data["buyer"],
+                font=ctk.CTkFont(size=11, weight="bold")
+            ).pack(side="left", padx=(8, 0))
+
+            # Quantity (if > 1)
+            if data["quantity"] > 1:
+                ctk.CTkLabel(
+                    row,
+                    text=f"x{data['quantity']}",
+                    font=ctk.CTkFont(size=11)
+                ).pack(side="left", padx=(8, 0))
+
+                ctk.CTkLabel(
+                    row,
+                    text=f"@ {data['price_per']:,}",
+                    font=ctk.CTkFont(size=11),
+                    text_color="gray"
+                ).pack(side="left", padx=(4, 0))
+
+            # Total (right-aligned)
+            ctk.CTkLabel(
+                row,
+                text=f"{data['total']:,}c",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color="#4CAF50"
+            ).pack(side="right")
+
+        # Raise the panel
+        self.shop_detail_content.tkraise()
 
     def _toggle_options(self):
         """Toggle between options panel and detail panel."""
@@ -2275,6 +2858,30 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
             except Exception as e:
                 self.zone_history_status.configure(text=f"Error: {e}", text_color="#F44336")
                 self.after(3000, lambda: self.zone_history_status.configure(text=""))
+
+    def _clear_shop_data(self):
+        """Clear all shop sales and log data."""
+        from tkinter import messagebox
+
+        result = messagebox.askyesno(
+            "Clear Shop Data",
+            "Clear all shop sales and log data?\n\nThis will remove all recorded sales, inventory, and shop logs.",
+            icon="warning"
+        )
+
+        if result:
+            try:
+                self.shop_parser.clear_data()
+                self.shop_data_status.configure(text="Cleared!", text_color="#4CAF50")
+                self._log_message("Shop data cleared")
+                self.after(3000, lambda: self.shop_data_status.configure(text=""))
+
+                # Refresh shop tab if it's currently visible
+                if hasattr(self, 'tabview') and self.tabview.get() == "Shop":
+                    self._refresh_shop_tab()
+            except Exception as e:
+                self.shop_data_status.configure(text=f"Error: {e}", text_color="#F44336")
+                self.after(3000, lambda: self.shop_data_status.configure(text=""))
 
     def _browse_folder(self):
         """Open folder browser dialog."""
@@ -2627,6 +3234,10 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 with self._data_lock:
                     results = self.parser.process_all_logs(callback=self._log_message)
 
+                # Parse shop logs from Player.log
+                if self.shop_parser.parse_player_log():
+                    self._log_message("Found new shop entries")
+
                 # Summarize results
                 if results:
                     self._log_message(f"Found new loot for {len(results)} creature(s)")
@@ -2656,6 +3267,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     self._update_zone_label()
                     self._refresh_creature_list()
                     self._refresh_stats()
+                    # Refresh shop tab if currently selected
+                    if self.current_left_tab == "Shop":
+                        self._refresh_shop_tab()
 
                 self.after(0, finish)
 
@@ -2691,6 +3305,10 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 with self._data_lock:
                     rescan_stats = self.parser.full_rescan(callback=filtered_callback)
 
+                # Parse shop logs from Player.log
+                if self.shop_parser.parse_player_log():
+                    self._log_message("Found new shop entries")
+
                 # Summarize results
                 new_creatures = rescan_stats.get("new_creatures", 0)
                 new_items = rescan_stats.get("new_items", 0)
@@ -2722,6 +3340,9 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     self._update_zone_label()
                     self._refresh_creature_list()
                     self._refresh_stats()
+                    # Refresh shop tab if currently selected
+                    if self.current_left_tab == "Shop":
+                        self._refresh_shop_tab()
 
                 self.after(0, finish)
 
