@@ -967,11 +967,15 @@ class LootParser:
         utc_now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
         self.creature_data[creature]["last_updated"] = utc_now
 
-        # Add zone if known, or "Unknown" if no zone data available
-        zone_to_add = zone if zone else "Unknown"
-        if zone_to_add not in self.creature_data[creature]["zones"]:
-            self.creature_data[creature]["zones"].append(zone_to_add)
-            self.creature_data[creature]["zones"].sort()
+        # Smart zone handling - don't pollute existing data with "Unknown"
+        if zone:
+            # Known zone - add it
+            if zone not in self.creature_data[creature]["zones"]:
+                self.creature_data[creature]["zones"].append(zone)
+                self.creature_data[creature]["zones"].sort()
+        elif not self.creature_data[creature]["zones"]:
+            # Unknown zone, but creature has NO zones yet - add "Unknown"
+            self.creature_data[creature]["zones"].append("Unknown")
 
     def _record_loot(self, creature: str, base_name: str, count: int = 1,
                      zone: Optional[str] = None) -> bool:
@@ -1001,7 +1005,7 @@ class LootParser:
                 "drops": 1,  # Number of drop events (for drop rate calculation)
                 "first_seen": today,
                 "last_seen": today,
-                "zones": [zone] if zone else ["Unknown"],
+                "zones": [zone] if zone else [],  # Don't add "Unknown" - leave empty if zone unknown
                 "wiki_only": False
             }
         else:
