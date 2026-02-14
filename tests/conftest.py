@@ -10,6 +10,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from loot_parser import LootParser
+from shop_parser import ShopParser
 
 
 @pytest.fixture
@@ -36,6 +37,12 @@ def parser(temp_log_dir, temp_storage_dir):
     p.creature_data = {}
     p.processed_state = {"files": {}}
     return p
+
+
+@pytest.fixture
+def shop_parser(temp_storage_dir):
+    """Create a ShopParser with temp storage directory."""
+    return ShopParser(storage_dir=temp_storage_dir)
 
 
 # Sample log data based on real game logs

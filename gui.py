@@ -1026,13 +1026,19 @@ class LootUploaderApp(ctk.CTk, TkinterDnD.DnDWrapper):
         """Handle shop view dropdown change."""
         self._refresh_shop_tab()
 
-    def _refresh_shop_tab(self):
-        """Refresh the Shop tab content."""
+    def _refresh_shop_tab(self, parse_log: bool = False):
+        """Refresh the Shop tab content.
+
+        Args:
+            parse_log: If True, parse Player.log for new entries first.
+                       If False, just refresh the display with existing data.
+        """
         if not hasattr(self, 'shop_tree'):
             return
 
-        # Parse latest data from Player.log
-        self.shop_parser.parse_player_log()
+        # Only parse if explicitly requested (e.g., Update button)
+        if parse_log:
+            self.shop_parser.parse_player_log()
 
         # Get current view
         view = self.shop_view_var.get()

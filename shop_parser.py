@@ -29,9 +29,9 @@ class ShopParser:
     )
 
     # Pattern for collection entries
-    # Example: Thu Feb 12 14:00 - PlayerName collected 500 councils
+    # Example: Sat Feb 14 12:09 - Zizzs collected 4350 Councils from customer purchases
     COLLECTION_PATTERN = re.compile(
-        r'^(\w{3} \w{3} \d{1,2} \d{2}:\d{2}) - (\w+) collected (\d+) councils$'
+        r'^(\w{3} \w{3} \d{1,2} \d{2}:\d{2}) - (\w+) collected (\d+) Councils from customer purchases$'
     )
 
     # Pattern for adding items
@@ -47,21 +47,21 @@ class ShopParser:
     )
 
     # Pattern for configuring price
-    # Example: Thu Feb 12 10:10 - PlayerName set price of Grapefish to 75
+    # Example: Fri Feb 13 21:28 - Zizzs configured Amethystx17 to cost 350 per 1
     SET_PRICE_PATTERN = re.compile(
-        r'^(\w{3} \w{3} \d{1,2} \d{2}:\d{2}) - (\w+) set price of (.+?) to (\d+)$'
+        r'^(\w{3} \w{3} \d{1,2} \d{2}:\d{2}) - (\w+) configured (.+?)x(\d+) to cost (\d+) per 1$'
     )
 
-    # Pattern for making item visible/invisible
-    # Example: Thu Feb 12 10:15 - PlayerName made Grapefish visible
+    # Pattern for making item visible in shop
+    # Example: Fri Feb 13 01:18 - Zizzs made Rubywall Crystalx40 visible in shop at a cost of 250 per 1
     VISIBILITY_PATTERN = re.compile(
-        r'^(\w{3} \w{3} \d{1,2} \d{2}:\d{2}) - (\w+) made (.+?) (visible|invisible)$'
+        r'^(\w{3} \w{3} \d{1,2} \d{2}:\d{2}) - (\w+) made (.+?)x(\d+) visible in shop at a cost of (\d+) per 1$'
     )
 
     # Pattern for vendor hire
-    # Example: Thu Feb 12 08:00 - PlayerName hired vendor for 500 councils
+    # Example: Sat Feb 14 12:09 - Zizzs paid 1700 Councils to hire Erica Hills for another 24 hours
     VENDOR_HIRE_PATTERN = re.compile(
-        r'^(\w{3} \w{3} \d{1,2} \d{2}:\d{2}) - (\w+) hired vendor for (\d+) councils$'
+        r'^(\w{3} \w{3} \d{1,2} \d{2}:\d{2}) - (\w+) paid (\d+) Councils to hire (.+?) for another (\d+) hours'
     )
 
     # Pattern for shop name change
@@ -305,7 +305,8 @@ class ShopParser:
                 entry["data"] = {
                     "player": match.group(2),
                     "item": match.group(3),
-                    "price": int(match.group(4))
+                    "quantity": int(match.group(4)),
+                    "price": int(match.group(5))
                 }
             elif match := self.VISIBILITY_PATTERN.match(line):
                 entry["type"] = "visibility"
@@ -313,14 +314,18 @@ class ShopParser:
                 entry["data"] = {
                     "player": match.group(2),
                     "item": match.group(3),
-                    "visible": match.group(4) == "visible"
+                    "quantity": int(match.group(4)),
+                    "price": int(match.group(5)),
+                    "visible": True
                 }
             elif match := self.VENDOR_HIRE_PATTERN.match(line):
                 entry["type"] = "vendor_hire"
                 entry["timestamp"] = match.group(1)
                 entry["data"] = {
                     "player": match.group(2),
-                    "cost": int(match.group(3))
+                    "cost": int(match.group(3)),
+                    "vendor_name": match.group(4),
+                    "hours": int(match.group(5))
                 }
             elif match := self.SHOP_NAME_PATTERN.match(line):
                 entry["type"] = "shop_name"
@@ -385,13 +390,25 @@ class ShopParser:
 
         elif entry_type == "set_price":
             item = entry_data["item"]
-            if item in data["current_inventory"]:
-                data["current_inventory"][item]["price"] = entry_data["price"]
+            price = entry_data["price"]
+            quantity = entry_data.get("quantity", 0)
+
+            # Configure entries give us a snapshot of current quantity
+            # This is more accurate than tracking add/remove/sale deltas
+            data["current_inventory"][item] = {
+                "quantity": quantity,
+                "price": price,
+                "visible": data["current_inventory"].get(item, {}).get("visible", True)
+            }
 
         elif entry_type == "visibility":
             item = entry_data["item"]
-            if item in data["current_inventory"]:
-                data["current_inventory"][item]["visible"] = entry_data["visible"]
+            # Visibility entries also give us a snapshot of current quantity and price
+            data["current_inventory"][item] = {
+                "quantity": entry_data.get("quantity", 0),
+                "price": entry_data.get("price"),
+                "visible": True
+            }
 
         elif entry_type == "shop_name":
             data["shop_name"] = entry_data["name"]
